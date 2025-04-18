@@ -1,0 +1,2 @@
+# Environment variables - DO NOT COMMIT API KEYS!
+.env
