@@ -38,8 +38,8 @@ This project focuses on developing an advanced semantic search and question-answ
 ## 📄 Note on Local Document Testing
 To test the document querying functionality locally with a sample document, such as the seminal "Attention Is All You Need" paper, please follow these steps:
 * **Paper Link:** Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., ... & Polosukhin, I. (2017). Attention is all you need. https://arxiv.org/abs/1706.03762
-* **Required Local Path:** For the application's current configuration to process this specific document (or others you wish to test locally), please download the PDF and place it in a data directory at the root of this project. For this example paper, the path would be: data/Attention Is All You Need.pdf.
+* **Required Local Path:** For the application's current configuration to process this specific document (or others you wish to test locally), please download the PDF and place it in a data directory at the root of this project. For this example paper, the path would be: "data/Attention Is All You Need.pdf".
 * **Important:** Please do not commit or upload PDF files like this to the GitHub repository. This instruction is for local testing purposes only to keep the repository lightweight and respect potential copyrights.
 
 
-*This README provides an overview based on the project's current development stage (as of April 2025). More details and code will be added very soon.*
+*This README provides an overview based on the project's current development stage (as of June 2025). More details and code will be added very soon.*
