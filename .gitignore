@@ -6,3 +6,4 @@ data/Attention Is All You Need.pdf
 
 # Others
 .DS_Store
+__pycache__/
