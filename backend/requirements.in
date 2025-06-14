@@ -1,0 +1,15 @@
+# --- Core Application Dependencies ---
+fastapi
+uvicorn[standard]
+python-dotenv
+pypdf
+langchain
+google-genai
+pinecone
+
+# --- Development & Testing Dependencies ---
+pytest
+pytest-asyncio
+ipykernel
+tqdm
+pip-tools
