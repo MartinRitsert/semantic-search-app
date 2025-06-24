@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
+from tenacity import RetryError
 
 # Import schemas and service functions
 from schemas import QueryRequest, QueryResponse, UploadResponse
@@ -103,6 +104,11 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         # Get the answer from the RAG service, passing the query and session ID
         result = await rag_service.get_rag_answer(request.query, request.chat_session_id)
         return QueryResponse(answer=result["answer"], chat_session_id=result["chat_session_id"])
+    except RetryError:
+        raise HTTPException(
+            status_code=503,  # 503 Service Unavailable
+            detail="The AI model is currently overloaded. Please try again in a moment."
+        )
     except Exception as e:
         # Handle unexpected errors during the RAG process
         print(f"An unexpected error occurred during query processing: {e}")

@@ -15,6 +15,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pinecone import Pinecone, ServerlessSpec
 from google import genai
 from google.genai import types as genai_types
+from tenacity import retry, stop_after_attempt, wait_exponential
 from typing import Any
 
 
@@ -29,7 +30,7 @@ pinecone_index = None
 # For a production application, this should be replaced with a more persistent
 # and scalable solution like Redis, a database, or another caching mechanism
 # to handle multiple server instances and user sessions.
-chat_sessions: dict[str, Any] = {}  # TODO: Check API documentation for chat session implementation again
+chat_sessions: dict[str, Any] = {}
 
 
 def initialize_clients():
@@ -149,8 +150,10 @@ async def process_and_index_document(file_content: bytes):
     # This keeps the demo simple, focusing on one document at a time.
     # In a multi-user app, one would use namespaces to isolate data.
     # TODO: Inform the user about this limitation in the UI.
-    print("Clearing previous data from index...")
-    await pinecone_index.delete(delete_all=True)
+    index_stats = await pinecone_index.describe_index_stats()
+    if index_stats.total_vector_count > 0:
+        print("Clearing previous data from index...")
+        await pinecone_index.delete(delete_all=True)
 
     print(f"Upserting {len(all_vectors_to_upsert)} vectors to Pinecone...")
     for i in range(0, len(all_vectors_to_upsert), pinecone_upsert_batch_size):
@@ -158,6 +161,13 @@ async def process_and_index_document(file_content: bytes):
         await pinecone_index.upsert(vectors=batch_to_upsert)
 
     print("Document processing and indexing complete.")
+
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def _send_message_with_retry(chat_session: Any, prompt: str) -> Any:
+    """Helper function to send a message to Gemini with retry logic."""
+    print("Generating answer with Gemini...")
+    return await chat_session.send_message(prompt)
 
 
 async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, str]:
@@ -211,7 +221,6 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
     """
 
     # 3. Generate
-    print("Generating answer with Gemini...")
-    response = await chat_session.send_message(prompt)
-    
+    response = await _send_message_with_retry(chat_session, prompt)
+
     return {"answer": response.text, "chat_session_id": chat_session_id}

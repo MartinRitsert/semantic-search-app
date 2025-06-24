@@ -6,6 +6,7 @@ pypdf
 langchain
 google-genai
 pinecone[asyncio]
+tenacity
 
 # --- Development & Testing Dependencies ---
 pytest

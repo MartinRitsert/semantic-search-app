@@ -263,6 +263,7 @@ starlette==0.37.2
     # via fastapi
 tenacity==8.5.0
     # via
+    #   -r requirements.in
     #   langchain
     #   langchain-core
 tornado==6.5.1
