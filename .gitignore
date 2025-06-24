@@ -7,3 +7,18 @@ data/Attention Is All You Need.pdf
 # Others
 .DS_Store
 __pycache__/
+
+# Frontend Node.js dependencies
+frontend/node_modules/
+
+# Next.js build output
+frontend/.next/
+
+# Local environment variables for the frontend
+frontend/.env.local
+
+# Log and temporary files
+frontend/*.log
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
