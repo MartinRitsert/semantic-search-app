@@ -36,7 +36,7 @@ async def lifespan(app: FastAPI):
 
     # This block runs on application shutdown
     print("--- Application Shutdown ---")
-    # Todo: I could add cleanup logic here if needed (e.g., closing client connections)
+    await rag_service.close_clients()
 
 
 # Initialize the FastAPI application with the lifespan manager
@@ -46,9 +46,13 @@ app = FastAPI(lifespan=lifespan, title="RAG Application API")
 # --- CORS Middleware ---
 # Configure CORS (Cross-Origin Resource Sharing) to allow the frontend
 # (running on a different domain/port) to communicate with this backend.
+origins = [
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Todo: Allows all origins. For production, restrict this to your frontend's domain.
+    allow_origins=origins,  # Todo: Allows all origins. For production, restrict this to your frontend's domain.
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
     allow_headers=["*"],  # Allows all headers

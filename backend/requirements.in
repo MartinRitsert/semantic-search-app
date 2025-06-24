@@ -5,7 +5,7 @@ python-dotenv
 pypdf
 langchain
 google-genai
-pinecone
+pinecone[asyncio]
 
 # --- Development & Testing Dependencies ---
 pytest

@@ -71,8 +71,22 @@ def initialize_clients():
     else:
         print(f"Index '{index_name}' already exists.")
 
-    pinecone_index = pinecone_client.Index(index_name)
-    print(f"Connected to Pinecone index '{index_name}'.")
+    # Initialize an async-capable index object.
+    index_host = pinecone_client.describe_index(index_name).host  # Get host URL
+    pinecone_index = pinecone_client.IndexAsyncio(host=index_host)
+    print(f"Connected to Pinecone index '{index_name}' at {index_host}.")
+
+
+async def close_clients():
+    """
+    Closes the Pinecone client. 
+    The Google AI client is closed automatically by the library.
+    """
+    global pinecone_index
+    if pinecone_index:
+        print("Closing Pinecone index connection...")
+        await pinecone_index.close()
+        pinecone_index = None
 
 
 async def process_and_index_document(file_content: bytes):
@@ -160,7 +174,7 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
         print("Creating a new chat session...")
         chat_session_id = str(uuid.uuid4())
         llm_model_identifier = 'gemini-2.0-flash'
-        chat_sessions[chat_session_id] = await google_ai_client.aio.chats.create(model=llm_model_identifier)
+        chat_sessions[chat_session_id] = google_ai_client.aio.chats.create(model=llm_model_identifier)
 
     chat_session = chat_sessions[chat_session_id]
 
