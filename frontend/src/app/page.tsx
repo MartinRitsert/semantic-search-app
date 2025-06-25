@@ -77,6 +77,19 @@ export default function ChatPage() {
     }
   };
 
+  // Handler for the "Choose File" button click
+  const handleChooseFileClick = () => {
+    // Show a simple, informative alert to the user.
+    const warningMessage = "Public Demo Notice:\n\n" +
+                       "This is a shared demo that handles one document at a time. " +
+                       "Uploading a new file will replace the current one for all users.\n\n" +
+                       "Please do not upload any private or sensitive information.";
+    window.alert(warningMessage);
+    
+    // Programmatically click the hidden file input to open the file browser.
+    fileInputRef.current?.click();
+  };
+
   // Handler for submitting the selected file to the backend
   const handleFileUpload = async () => {
     if (!selectedFile) {
@@ -177,7 +190,7 @@ export default function ChatPage() {
                     disabled={isUploadLoading}
                 />
                 <button
-                    onClick={() => fileInputRef.current?.click()}
+                    onClick={handleChooseFileClick}
                     disabled={isUploadLoading}
                     className="flex items-center space-x-2 px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors"
                 >
