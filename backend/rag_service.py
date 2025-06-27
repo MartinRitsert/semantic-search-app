@@ -10,6 +10,7 @@ the API endpoints in main.py clean and focused on request/response handling.
 import os
 import uuid
 import io
+import asyncio
 from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pinecone import Pinecone, ServerlessSpec
@@ -97,7 +98,8 @@ async def process_and_index_document(file_content: bytes):
     if not pinecone_index or not google_ai_client:
         raise RuntimeError("Clients are not initialized. The application might not have started correctly.")
 
-    print("Processing document...")
+    document_id = str(uuid.uuid4())
+    print(f"Processing document with unique ID: {document_id}...")
     
     # 1. Load and Extract Text from in-memory bytes
     # NOTE: pypdf's extract_text() is used here for simplicity. For a production system handling
@@ -128,7 +130,7 @@ async def process_and_index_document(file_content: bytes):
     pinecone_upsert_batch_size = 100  # Pinecone's recommended upsert batch size
 
     all_vectors_to_upsert = [
-        {"id": f"chunk_{i}", "metadata": {"text": chunk}, "values": []}
+        {"id": f"{document_id}_chunk_{i}", "metadata": {"text": chunk}, "values": []}
         for i, chunk in enumerate(text_chunks)
     ]
 
@@ -158,6 +160,31 @@ async def process_and_index_document(file_content: bytes):
     for i in range(0, len(all_vectors_to_upsert), pinecone_upsert_batch_size):
         batch_to_upsert = all_vectors_to_upsert[i : i + pinecone_upsert_batch_size]
         await pinecone_index.upsert(vectors=batch_to_upsert)
+
+    # Verify that the upserted vectors are queryable.
+    # NOTE: To handle Pinecone's eventual consistency, this readiness check performs a direct
+    # queryability test. It repeatedly tries to `fetch()` the first vector that was just upserted,
+    # as a successful fetch confirms the index is ready. If the check fails after the timeout,
+    # a warning is printed before continuing, prioritizing a smooth demo experience.
+    print("Verifying index readiness...")
+    test_vector_id = all_vectors_to_upsert[0]['id']
+    max_retries = 20
+    retry_delay = 1  # seconds
+
+    for i in range(max_retries):
+        try:
+            fetch_response = await pinecone_index.fetch(ids=[test_vector_id])
+            if fetch_response.vectors.get(test_vector_id):
+                print(f"Index is ready. Found test vector '{test_vector_id}'.")
+                break  # Exit the loop on success
+        except Exception as e:
+            print(f"Attempt {i+1}/{max_retries}: Error during fetch: {e}")
+
+        print(f"Attempt {i+1}/{max_retries}: Waiting for index update... Test vector not found yet.")
+        await asyncio.sleep(retry_delay)
+    else:
+        # This 'else' block runs only if the loop finishes without a 'break'
+        print(f"Warning: Index readiness could not be confirmed after {max_retries * retry_delay} seconds.")
 
     print("Document processing and indexing complete.")
 
