@@ -11,6 +11,7 @@ import os
 import uuid
 import io
 import asyncio
+from fastapi import HTTPException
 from pypdf import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pinecone import Pinecone, ServerlessSpec
@@ -34,7 +35,7 @@ pinecone_index = None
 chat_sessions: dict[str, Any] = {}
 
 
-def initialize_clients():
+def initialize_clients() -> None:
     """Initializes the Pinecone and Google AI clients using environment variables."""
     global pinecone_client, google_ai_client, pinecone_index
     
@@ -49,37 +50,49 @@ def initialize_clients():
 
     # Initialize Google Gen AI Client
     print("Initializing Google Gen AI Client...")
-    google_ai_client = genai.Client(api_key=google_api_key)
-    print("Google Gen AI Client initialized.")
+    try:
+        google_ai_client = genai.Client(api_key=google_api_key)
+        print("Google Gen AI Client initialized.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Google Gen AI Client: {e}")
 
     # Initialize Pinecone Connection
     print("Initializing Pinecone connection...")
-    pinecone_client = Pinecone(api_key=pinecone_api_key)
-    print("Pinecone client initialized.")
+    try:
+        pinecone_client = Pinecone(api_key=pinecone_api_key)
+        print("Pinecone client initialized.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize Pinecone client: {e}")
 
     # Connect to the Pinecone Index or create it if it doesn't exist
     index_name = 'semantic-search-app-index'
     embedding_dim = 768  # Dimension for Google's embedding-004 model
 
-    if index_name not in [index_info["name"] for index_info in pinecone_client.list_indexes()]:
-        print(f"Index '{index_name}' does not exist. Creating...")
-        pinecone_client.create_index(
-            name=index_name,
-            dimension=embedding_dim,
-            metric='cosine',
-            spec=ServerlessSpec(cloud='aws', region='us-east-1')
-        )
-        print(f"Index '{index_name}' created successfully.")
-    else:
-        print(f"Index '{index_name}' already exists.")
+    try:
+        if index_name not in [index_info["name"] for index_info in pinecone_client.list_indexes()]:
+            print(f"Index '{index_name}' does not exist. Creating...")
+            pinecone_client.create_index(
+                name=index_name,
+                dimension=embedding_dim,
+                metric='cosine',
+                spec=ServerlessSpec(cloud='aws', region='us-east-1')
+            )
+            print(f"Index '{index_name}' created successfully.")
+        else:
+            print(f"Index '{index_name}' already exists.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to create or connect to Pinecone index '{index_name}': {e}")
 
     # Initialize an async-capable index object.
-    index_host = pinecone_client.describe_index(index_name).host  # Get host URL
-    pinecone_index = pinecone_client.IndexAsyncio(host=index_host)
-    print(f"Connected to Pinecone index '{index_name}' at {index_host}.")
+    try:
+        index_host = pinecone_client.describe_index(index_name).host  # Get host URL
+        pinecone_index = pinecone_client.IndexAsyncio(host=index_host)
+        print(f"Connected to Pinecone index '{index_name}' at {index_host}.")
+    except Exception as e:
+        raise RuntimeError(f"Failed to get host and connect to Pinecone index '{index_name}': {e}")
 
 
-async def close_clients():
+async def close_clients() -> None:
     """
     Closes the Pinecone client. 
     The Google AI client is closed automatically by the library.
@@ -87,16 +100,24 @@ async def close_clients():
     global pinecone_index
     if pinecone_index:
         print("Closing Pinecone index connection...")
-        await pinecone_index.close()
-        pinecone_index = None
+        try:
+            await pinecone_index.close()
+        except Exception as e:
+            print(f"Error while closing Pinecone index connection: {e}")
+        finally:
+            pinecone_index = None
 
 
-async def process_and_index_document(file_content: bytes):
+async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     """
     Processes an uploaded PDF file, chunks it, generates embeddings, and upserts to Pinecone.
     """
     if not pinecone_index or not google_ai_client:
-        raise RuntimeError("Clients are not initialized. The application might not have started correctly.")
+        print("Clients are not initialized. The application might not have started correctly.")
+        raise HTTPException(
+            status_code=500,
+            detail="Server configuration error: clients are not available."
+        )
 
     document_id = str(uuid.uuid4())
     print(f"Processing document with unique ID: {document_id}...")
@@ -108,11 +129,14 @@ async def process_and_index_document(file_content: bytes):
     try:
         reader = PdfReader(io.BytesIO(file_content))  # Read from in-memory bytes
         full_document_text = "".join(page.extract_text() for page in reader.pages if page.extract_text())
+        if not full_document_text:
+            raise ValueError("Could not extract any text from the provided PDF.")
     except Exception as e:
-        raise ValueError(f"Failed to read or extract text from PDF: {e}")
-
-    if not full_document_text:
-        raise ValueError("Could not extract any text from the provided PDF.")
+        print(f"Failed to parse PDF: {e}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to process PDF. Please ensure it is a valid file."
+        )
 
     # 2. Chunk Text
     text_splitter = RecursiveCharacterTextSplitter(
@@ -135,31 +159,52 @@ async def process_and_index_document(file_content: bytes):
     ]
 
     print(f"Generating embeddings for {len(text_chunks)} chunks...")
-    for i in range(0, len(all_vectors_to_upsert), google_batch_size):
-        batch_items = all_vectors_to_upsert[i : i + google_batch_size]
-        texts_to_embed = [item['metadata']['text'] for item in batch_items]
-        
-        response = await google_ai_client.aio.models.embed_content(
-            model=model_name,
-            contents=texts_to_embed,
-            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
+    try:
+        for i in range(0, len(all_vectors_to_upsert), google_batch_size):
+            batch_items = all_vectors_to_upsert[i : i + google_batch_size]
+            texts_to_embed = [item['metadata']['text'] for item in batch_items]
+            
+            response = await google_ai_client.aio.models.embed_content(
+                model=model_name,
+                contents=texts_to_embed,
+                config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT")
+            )
+            
+            for j, embedding in enumerate(response.embeddings):
+                all_vectors_to_upsert[i + j]['values'] = embedding.values
+    except Exception as e:
+        print(f"Google AI embedding call failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not generate document embeddings. The embedding service may be down."
         )
-        
-        for j, embedding in enumerate(response.embeddings):
-            all_vectors_to_upsert[i + j]['values'] = embedding.values
 
     # Before upserting a new document, clear all old data from the index.
     # This keeps the demo simple, focusing on one document at a time.
     # NOTE: In a multi-user app, one would use namespaces to isolate data.
-    index_stats = await pinecone_index.describe_index_stats()
-    if index_stats.total_vector_count > 0:
-        print("Clearing previous data from index...")
-        await pinecone_index.delete(delete_all=True)
+    try:
+        index_stats = await pinecone_index.describe_index_stats()
+        if index_stats.total_vector_count > 0:
+            print("Clearing previous data from index...")
+            await pinecone_index.delete(delete_all=True)
+    except Exception as e:
+        print(f"Failed to clear Pinecone index: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not prepare the vector database for new document. Please try again later."
+        )
 
     print(f"Upserting {len(all_vectors_to_upsert)} vectors to Pinecone...")
-    for i in range(0, len(all_vectors_to_upsert), pinecone_upsert_batch_size):
-        batch_to_upsert = all_vectors_to_upsert[i : i + pinecone_upsert_batch_size]
-        await pinecone_index.upsert(vectors=batch_to_upsert)
+    try:
+        for i in range(0, len(all_vectors_to_upsert), pinecone_upsert_batch_size):
+            batch_to_upsert = all_vectors_to_upsert[i : i + pinecone_upsert_batch_size]
+            await pinecone_index.upsert(vectors=batch_to_upsert)
+    except Exception as e:
+        print(f"Pinecone upsert failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save document to the vector database. The database may be down."
+        )
 
     # Verify that the upserted vectors are queryable.
     # NOTE: To handle Pinecone's eventual consistency, this readiness check performs a direct
@@ -187,6 +232,12 @@ async def process_and_index_document(file_content: bytes):
         print(f"Warning: Index readiness could not be confirmed after {max_retries * retry_delay} seconds.")
 
     print("Document processing and indexing complete.")
+    return {
+        "status": "success",
+        "message": "Document processed successfully.",
+        "document_id": document_id,
+        "chunk_count": len(text_chunks)
+    }
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
@@ -202,7 +253,11 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
     Manages chat sessions in-memory.
     """
     if not pinecone_index or not google_ai_client:
-        raise RuntimeError("Clients are not initialized.")
+        print("Clients are not initialized during a request.")
+        raise HTTPException(
+            status_code=500, 
+            detail="Server configuration error: clients are not available."
+        )
 
     # --- Chat Session Management ---
     # If no session ID is provided, create a new one. This allows for conversation history.
@@ -214,47 +269,55 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
 
     chat_session = chat_sessions[chat_session_id]
 
-    # 1. Retrieve
-    print(f"Embedding query: '{query}'")
-    embedding_response = await google_ai_client.aio.models.embed_content(
-        model="models/text-embedding-004",
-        contents=query,
-        config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
-    )
-    query_embedding = embedding_response.embeddings[0].values
+    try:
+        # 1. Retrieve
+        print(f"Embedding query: '{query}'")
+        embedding_response = await google_ai_client.aio.models.embed_content(
+            model="models/text-embedding-004",
+            contents=query,
+            config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
+        )
+        query_embedding = embedding_response.embeddings[0].values
 
-    print("Querying Pinecone...")
-    query_results = await pinecone_index.query(
-        vector=query_embedding,
-        top_k=5,  # Using 5 for more consistent results based on earlier experiments
-        include_metadata=True
-    )
-    
-    # 2. Augment
-    context_chunks = []
-    if query_results.matches:
-        for match in query_results.matches:
-            if match.metadata and 'text' in match.metadata:
-                context_chunks.append(match.metadata['text'])
-        print(f"Retrieved {len(context_chunks)} chunks.")
-    else:
-        print("No relevant chunks found in Pinecone.")
+        print("Querying Pinecone...")
+        query_results = await pinecone_index.query(
+            vector=query_embedding,
+            top_k=5,  # Using 5 for more consistent results based on earlier experiments
+            include_metadata=True
+        )
+        
+        # 2. Augment
+        context_chunks = []
+        if query_results.matches:
+            for match in query_results.matches:
+                if match.metadata and 'text' in match.metadata:
+                    context_chunks.append(match.metadata['text'])
+            print(f"Retrieved {len(context_chunks)} chunks.")
+        else:
+            print("No relevant chunks found in Pinecone.")
 
-    context_string = "\n\n---\n\n".join(context_chunks)
+        context_string = "\n\n---\n\n".join(context_chunks)
 
-    prompt = f"""
-    Based ONLY on the following context, answer the question.
-    If the answer is not found in the context, state "I cannot answer this question based on the provided information."
+        prompt = f"""
+        Based ONLY on the following context, answer the question.
+        If the answer is not found in the context, state "I cannot answer this question based on the provided information."
 
-    Context:
-    {context_string}
+        Context:
+        {context_string}
 
-    Question: {query}
+        Question: {query}
 
-    Answer:
-    """
+        Answer:
+        """
 
-    # 3. Generate
-    response = await _send_message_with_retry(chat_session, prompt)
+        # 3. Generate
+        response = await _send_message_with_retry(chat_session, prompt)
 
-    return {"answer": response.text, "chat_session_id": chat_session_id}
+        return {"answer": response.text, "chat_session_id": chat_session_id}
+
+    except Exception as e:
+        print(f"Error during RAG answer generation: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to get an answer due to an external service error. Please try again later."
+        )

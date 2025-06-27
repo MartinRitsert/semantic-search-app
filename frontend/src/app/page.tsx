@@ -116,8 +116,13 @@ export default function ChatPage() {
         setMessages([]);
         setChatSessionId(null);
 
-    } catch (err: any) {
-        setUploadState({ status: 'error', message: err.message || 'Upload failed. Please try again.' });
+    } catch (err: unknown) {
+      let errorMessage = 'Upload failed. Please try again.';
+      if (err instanceof Error) {
+        errorMessage = err.message;
+      }
+      
+      setUploadState({ status: 'error', message: errorMessage });
     }
   };
 
@@ -144,15 +149,20 @@ export default function ChatPage() {
 
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.detail || 'An unknown error occurred.');
+        throw new Error(errorData.detail || 'An unexpected error occurred while processing your request.');
       }
 
       const data = await response.json();
       setMessages(prev => [...prev, { role: 'bot', text: data.answer }]);
       setChatSessionId(data.chat_session_id);
 
-    } catch (err: any) {
-      setQueryState({ isLoading: false, error: err.message });
+    } catch (err: unknown) {
+      let errorMessage = 'An unexpected error occurred.';
+      if (err instanceof Error) {
+        errorMessage = err.message;
+      }
+
+      setQueryState(prev => ({ ...prev, error: errorMessage }));
       setMessages(prev => [...prev, { role: 'bot', text: "Sorry, I couldn't get a response. Please check the backend or try again." }]);
     } finally {
       setQueryState(prev => ({ ...prev, isLoading: false }));
