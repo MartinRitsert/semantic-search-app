@@ -148,8 +148,7 @@ async def process_and_index_document(file_content: bytes):
 
     # Before upserting a new document, clear all old data from the index.
     # This keeps the demo simple, focusing on one document at a time.
-    # In a multi-user app, one would use namespaces to isolate data.
-    # TODO: Inform the user about this limitation in the UI.
+    # NOTE: In a multi-user app, one would use namespaces to isolate data.
     index_stats = await pinecone_index.describe_index_stats()
     if index_stats.total_vector_count > 0:
         print("Clearing previous data from index...")
