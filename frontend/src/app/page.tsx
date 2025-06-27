@@ -1,6 +1,16 @@
 "use client";
 
 import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import { 
+  TypingIndicator, 
+  UploadIcon, 
+  SendIcon, 
+  CheckIcon, 
+  WarningIcon, 
+  ClockIcon, 
+  LoadingSpinner 
+} from '@/components/Icons';
 
 // --- Type Definitions ---
 /**
@@ -10,26 +20,6 @@ interface Message {
   role: 'user' | 'bot';
   text: string;
 }
-
-// --- UI Icon Components ---
-const SendIcon = () => (
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M22 2L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    <path d="M22 2L15 22L11 13L2 9L22 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-  </svg>
-);
-
-const UploadIcon = () => (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <polyline points="17 8 12 3 7 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-        <line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-    </svg>
-);
-
-const LoadingSpinner = () => (
-  <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-white"></div>
-);
 
 // --- Main Chat Component ---
 /**
@@ -42,18 +32,16 @@ export default function ChatPage() {
 
   // State for the user's current input
   const [query, setQuery] = useState<string>('');
-
-  // State for the selected PDF file
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   
   // State for the current conversation's session ID
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
 
   // State for loading and status indicators
-  const [isQueryLoading, setIsQueryLoading] = useState<boolean>(false);
-  const [isUploadLoading, setIsUploadLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<string>('');
+  const [queryState, setQueryState] = useState({ isLoading: false, error: null as string | null });
+  const [uploadState, setUploadState] = useState({
+    status: 'idle', // 'idle' | 'loading' | 'success' | 'error'
+    message: ''
+  });
 
   // Refs for direct DOM element access
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -62,23 +50,27 @@ export default function ChatPage() {
   // Effect to auto-scroll to the latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, queryState.isLoading]);
 
   // Handler for file input changes
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file && file.type === "application/pdf") {
-      setSelectedFile(file);
-      setUploadStatus(`Selected: ${file.name}`);
-      setError(null);
+      setUploadState({ status: 'idle', message: '' }); // Clear previous errors
+      handleFileUpload(file);
     } else {
-      setSelectedFile(null);
-      setError("Please select a valid PDF file.");
+      if (file) {
+        setUploadState({ status: 'error', message: 'Please select a valid PDF file.' });
+      }
+    }
+    // Reset file input to allow re-uploading the same file
+    if (e.target) {
+      e.target.value = '';
     }
   };
 
-  // Handler for the "Choose File" button click
-  const handleChooseFileClick = () => {
+  // Handler for the "Upload PDF" button click
+  const handleUploadClick = () => {
     // Show a simple, informative alert to the user.
     const warningMessage = "Public Demo Notice:\n\n" +
                        "This is a shared demo that handles one document at a time. " +
@@ -91,18 +83,16 @@ export default function ChatPage() {
   };
 
   // Handler for submitting the selected file to the backend
-  const handleFileUpload = async () => {
-    if (!selectedFile) {
-        setError("Please select a file first.");
+  const handleFileUpload = async (file: File) => {
+    if (!file) {
+        setUploadState({ status: 'error', message: 'Please select a file first.' });
         return;
     }
 
-    setIsUploadLoading(true);
-    setUploadStatus(`Uploading "${selectedFile.name}"...`);
-    setError(null);
+    setUploadState({ status: 'loading', message: `Uploading "${file.name}"...` });
 
     const formData = new FormData();
-    formData.append('file', selectedFile);
+    formData.append('file', file);
 
     try {
         const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/upload/`;
@@ -117,18 +107,17 @@ export default function ChatPage() {
         }
 
         const data = await response.json();
-        setUploadStatus(`Success: "${data.filename}" is indexed. You can now ask questions.`);
+        setUploadState({ 
+            status: 'success', 
+            message: `Success: "${data.filename}" is indexed. You can now ask questions.` 
+        });
         
         // Reset chat state after a new document is successfully indexed
         setMessages([]);
         setChatSessionId(null);
 
     } catch (err: any) {
-        setError(err.message);
-        setUploadStatus('Upload failed. Please try again.');
-    } finally {
-        setIsUploadLoading(false);
-        setSelectedFile(null);
+        setUploadState({ status: 'error', message: err.message || 'Upload failed. Please try again.' });
     }
   };
 
@@ -139,8 +128,7 @@ export default function ChatPage() {
 
     // Optimistically update the UI with the user's message
     setMessages(prev => [...prev, { role: 'user', text: query }]);
-    setIsQueryLoading(true);
-    setError(null);
+    setQueryState({ isLoading: true, error: null });
     setQuery('');
 
     try {
@@ -164,21 +152,24 @@ export default function ChatPage() {
       setChatSessionId(data.chat_session_id);
 
     } catch (err: any) {
-      setError(err.message);
+      setQueryState({ isLoading: false, error: err.message });
       setMessages(prev => [...prev, { role: 'bot', text: "Sorry, I couldn't get a response. Please check the backend or try again." }]);
     } finally {
-      setIsQueryLoading(false);
+      setQueryState(prev => ({ ...prev, isLoading: false }));
     }
   };
 
   return (
-    <div className="flex flex-col h-screen bg-gray-900 text-white font-sans">
-      
-      <header className="bg-gray-800/80 backdrop-blur-sm p-4 border-b border-gray-700 shadow-lg z-10">
-        <div className="max-w-5xl mx-auto flex justify-between items-center">
-            <div className="flex-1">
-                <h1 className="text-xl font-bold text-gray-100">Semantic Search RAG</h1>
-                <p className="text-xs text-gray-400">Built with FastAPI, Next.js, and Gemini</p>
+    <div className="flex flex-col h-screen bg-gray-900 text-gray-200 font-sans">
+      <header className="p-4 md:p-6 border-b border-gray-700/60 bg-gray-900/50 backdrop-blur-sm">
+        <div className="max-w-5xl mx-auto flex items-center justify-between">
+            <div className="flex flex-col">
+                <h1 className="text-xl md:text-2xl font-bold bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">
+                    RAG Assistant
+                </h1>
+                <p className="text-xs md:text-sm text-gray-400 tracking-wide">
+                    Built with FastAPI, Next.js, Pinecone and Gemini
+                </p>
             </div>
             <div className="flex items-center space-x-3 flex-1 justify-end">
                 <input
@@ -187,41 +178,62 @@ export default function ChatPage() {
                     onChange={handleFileChange}
                     accept="application/pdf"
                     className="hidden"
-                    disabled={isUploadLoading}
+                    disabled={uploadState.status === 'loading'}
                 />
-                <button
-                    onClick={handleChooseFileClick}
-                    disabled={isUploadLoading}
-                    className="flex items-center space-x-2 px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 disabled:bg-gray-500 disabled:cursor-not-allowed transition-colors"
-                >
-                    <UploadIcon />
-                    <span>Choose PDF</span>
-                </button>
-                {selectedFile && (
-                    <button
-                        onClick={handleFileUpload}
-                        disabled={isUploadLoading}
-                        className="px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-wait transition-colors font-semibold"
+                {uploadState.status === 'loading' ? (
+                  <div
+                    className="relative w-[150px] h-[40px] rounded-lg p-0.5
+                               bg-[conic-gradient(from_var(--border-angle)_at_50%_50%,#3b82f6_0%,#a855f7_50%,#3b82f6_100%)]
+                               animate-border-rotate"
+                    aria-label="Uploading and indexing document"
+                    role="status"
+                  >
+                    <div
+                      className="relative flex h-full w-full items-center justify-center rounded-[6px] bg-gray-800"
                     >
-                       {isUploadLoading ? 'Uploading...' : 'Upload'}
-                    </button>
+                      <span className="text-sm font-medium text-gray-300">
+                        Indexing...
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleUploadClick}
+                    className="flex items-center justify-center space-x-2 px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors w-[150px] h-[40px] whitespace-nowrap"
+                  >
+                    <UploadIcon />
+                    <span>Upload PDF</span>
+                  </button>
                 )}
             </div>
         </div>
-        {(uploadStatus || error) && (
-            <div className="max-w-5xl mx-auto mt-3 text-center text-sm">
-                {error && <p className="text-red-400">{error}</p>}
-                {uploadStatus && !error && <p className="text-gray-300">{uploadStatus}</p>}
+        {uploadState.message && uploadState.status !== 'idle' && (
+            <div className="max-w-5xl mx-auto mt-4">
+                <div 
+                    className={`flex items-center space-x-3 p-3 rounded-lg border text-sm shadow-lg
+                        ${uploadState.status === 'loading' && 'bg-gray-700/60 border-gray-600/80 text-gray-300'}
+                        ${uploadState.status === 'success' && 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]'}
+                        ${uploadState.status === 'error' && 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'}`
+                    }
+                >
+                    {uploadState.status === 'loading' && <ClockIcon />}
+                    {uploadState.status === 'success' && <CheckIcon />}
+                    {uploadState.status === 'error' && <WarningIcon />}
+                    <span>{uploadState.message}</span>
+                </div>
             </div>
         )}
       </header>
-
       <main className="flex-1 overflow-y-auto p-4 md:p-6">
         <div className="max-w-4xl mx-auto">
           {messages.length === 0 && (
              <div className="text-center text-gray-500 mt-10">
                 <p>No messages yet.</p>
-                <p>Upload a PDF to get started!</p>
+                <p>
+                  {uploadState.status === 'success'
+                    ? "PDF uploaded - Start asking questions!"
+                    : "Upload a PDF to get started!"}
+                </p>
              </div>
           )}
           {messages.map((message, index) => (
@@ -236,10 +248,26 @@ export default function ChatPage() {
                     : 'bg-gray-700 text-gray-200 rounded-bl-none'
                 }`}
               >
-                <p className="whitespace-pre-wrap">{message.text}</p>
+                <div>
+                  <ReactMarkdown
+                    components={{
+                      ul: ({ node, ...props }) => <ul className="list-disc pl-5" {...props} />,
+                      ol: ({ node, ...props }) => <ol className="list-decimal pl-5" {...props} />,
+                    }}
+                  >
+                    {message.text}
+                  </ReactMarkdown>
+                </div>
               </div>
             </div>
           ))}
+          {queryState.isLoading && (
+            <div className="flex mb-4 justify-start">
+              <div className="rounded-2xl p-4 max-w-lg lg:max-w-2xl shadow-lg animate-fade-in bg-gray-700 text-gray-200 rounded-bl-none">
+                <TypingIndicator />
+              </div>
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
       </main>
@@ -251,16 +279,20 @@ export default function ChatPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Ask a question about the uploaded document..."
+              placeholder={
+                uploadState.status === 'success'
+                  ? "Ask a question about the uploaded document..."
+                  : "Upload a PDF before asking questions!"
+              }
               className="flex-1 p-3 bg-gray-700 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-100 border border-transparent"
-              disabled={isQueryLoading}
+              disabled={queryState.isLoading}
             />
             <button
               type="submit"
               className="bg-blue-600 p-3 rounded-full hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed transition-colors flex items-center justify-center w-12 h-12 shrink-0"
-              disabled={isQueryLoading || !query.trim()}
+              disabled={queryState.isLoading || !query.trim()}
             >
-              {isQueryLoading ? <LoadingSpinner /> : <SendIcon />}
+              {queryState.isLoading ? <LoadingSpinner /> : <SendIcon />}
             </button>
           </form>
         </div>
