@@ -231,7 +231,15 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
     )
     
     # 2. Augment
-    context_chunks = [match.metadata['text'] for match in query_results.matches if match.metadata and 'text' in match.metadata]
+    context_chunks = []
+    if query_results.matches:
+        for match in query_results.matches:
+            if match.metadata and 'text' in match.metadata:
+                context_chunks.append(match.metadata['text'])
+        print(f"Retrieved {len(context_chunks)} chunks.")
+    else:
+        print("No relevant chunks found in Pinecone.")
+
     context_string = "\n\n---\n\n".join(context_chunks)
 
     prompt = f"""
