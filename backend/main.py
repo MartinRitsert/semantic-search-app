@@ -13,10 +13,11 @@ import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from tenacity import RetryError
+import uuid
 import logging
 
 # Import schemas and service functions
-from schemas import QueryRequest, QueryResponse, UploadResponse
+from schemas import QueryRequest, QueryResponse, UploadResponse, ChatSession, MessageRole
 import rag_service
 
 
@@ -26,12 +27,20 @@ load_dotenv()
 
 # Configure logging to capture debug information and errors.
 logging.basicConfig(
-    level=logging.INFO,  # Set to DEBUG for more verbose output
+    level=logging.DEBUG,  # Set to DEBUG for more verbose output
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 # Get a logger for this module.
 logger = logging.getLogger(__name__)
+
+
+# --- STATE INITIALIZATION ---
+# In-memory storage for chat sessions.
+# For a production application, this should be replaced with a more persistent
+# and scalable solution like Redis, a database, or another caching mechanism
+# to handle multiple server instances and user sessions.
+chat_sessions: dict[str, ChatSession] = {}
 
 
 # --- Lifespan Events ---
@@ -86,12 +95,12 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         file_content = await file.read()
         
         # Process and index the document using the service function
-        await rag_service.process_and_index_document(file_content)
+        result = await rag_service.process_and_index_document(file_content)
         
         return UploadResponse(
             message="File processed and indexed successfully.", 
             filename=file.filename,
-            pinecone_index_name='semantic-search-app-index'  # Returning the index name for confirmation
+            document_id=result["document_id"]
         )
     except ValueError as e:
         # Handle specific value errors from the service (e.g., no text found)
@@ -113,14 +122,30 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         logger.error("Received an empty query.")
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     
+    chat_session_id = request.chat_session_id
+
+    # 1. Manage State: Look up the session or create a new one.
+    if not chat_session_id or chat_session_id not in chat_sessions:
+        chat_session_id = str(uuid.uuid4())
+        chat_sessions[chat_session_id] = ChatSession()
+        logger.info("Created new chat session with ID: %s", chat_session_id)
+
+    chat_session = chat_sessions[chat_session_id]
+
     try:
-        # Get the answer from the RAG service, passing the query and session ID
-        result = await rag_service.get_rag_answer(request.query, request.chat_session_id)
-        return QueryResponse(answer=result["answer"], chat_session_id=result["chat_session_id"])
+        # 2. Call Service: Pass the query and history to the stateless service function.
+        logger.info("Passing query to RAG service for session: %s", chat_session_id)
+        answer = await rag_service.get_rag_answer(request.query, chat_session.history)
+        
+        # 3. Update State: Save the new user message and model answer to the session.
+        chat_session.add_message(role=MessageRole.USER, text=request.query)
+        chat_session.add_message(role=MessageRole.MODEL, text=answer)
+        
+        return QueryResponse(answer=answer, chat_session_id=chat_session_id)
     except RetryError:
         logger.error("AI model is overloaded. Retry limit exceeded.")
         raise HTTPException(
-            status_code=503,  # 503 Service Unavailable
+            status_code=503,
             detail="The AI model is currently overloaded. Please try again in a moment."
         )
     except Exception as e:

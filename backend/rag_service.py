@@ -21,9 +21,17 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from typing import Any
 import logging
 
+# Import schemas
+from schemas import Message, format_history_for_prompt
+
 
 # Get a logger for this module.
 logger = logging.getLogger(__name__)
+
+
+# --- CONSTANTS ---
+LLM_MODEL_IDENTIFIER = "gemini-2.0-flash"
+EMBEDDING_MODEL_IDENTIFIER = "models/text-embedding-004"
 
 
 # --- CLIENT AND STATE INITIALIZATION ---
@@ -32,12 +40,6 @@ logger = logging.getLogger(__name__)
 google_ai_client: genai.Client | None = None
 pinecone_client: Pinecone | None = None
 pinecone_index = None
-
-# In-memory storage for chat sessions.
-# For a production application, this should be replaced with a more persistent
-# and scalable solution like Redis, a database, or another caching mechanism
-# to handle multiple server instances and user sessions.
-chat_sessions: dict[str, Any] = {}
 
 
 def initialize_clients() -> None:
@@ -161,7 +163,7 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     logger.info("Document split into %d chunks.", len(text_chunks))
 
     # 3. Embed and Upsert to Pinecone
-    model_name = "models/text-embedding-004"
+    model_name = EMBEDDING_MODEL_IDENTIFIER
     google_batch_size = 100  # Google's text embedding API limit for texts in a batch
     pinecone_upsert_batch_size = 100  # Pinecone's recommended upsert batch size
 
@@ -244,22 +246,57 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
         logger.warning("Index readiness could not be confirmed after %d seconds.", max_retries * retry_delay)
 
     logger.info("Document processing and indexing complete.")
-    return {
-        "status": "success",
-        "message": "Document processed successfully.",
-        "document_id": document_id,
-        "chunk_count": len(text_chunks)
-    }
+    return {"document_id": document_id}
 
+
+async def _rewrite_query_with_history(history: list[Message], query: str) -> str:
+    """
+    Rewrites the user's query using chat history to create a standalone question.
+    """
+    logger.info("Rewriting query with chat history...")
+    
+    # Retrieve the last 10 messages (e.g. 5 user + 5 model) from the chat history.
+    formatted_history = format_history_for_prompt(history, limit=10)
+    logging.debug("Formatted chat history for rewriting: %s", formatted_history)
+
+    prompt = f"""
+    You are an expert at rephrasing user questions to be optimized for a vector database search.
+    Your task is to take the chat history and the user's new, potentially vague question, and rewrite it into a clear, standalone question.
+    This new question should be rich in keywords and context, making it ideal for finding relevant text chunks through semantic search.
+
+    Chat History:
+    {formatted_history}
+
+    New Question:
+    {query}
+
+    Standalone Question for Vector Search:
+    """
+    try:
+        response = await google_ai_client.aio.models.generate_content(
+            model=LLM_MODEL_IDENTIFIER,
+            contents=prompt
+        )
+        rewritten_query = response.text
+        logger.info("Original query: '%s' | Rewritten query: '%s'", query, rewritten_query)
+        return rewritten_query
+    except Exception as e:
+        logger.warning("Error during query rewriting: '%s'. Falling back to original query.", e)
+        return query
+    
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def _send_message_with_retry(chat_session: Any, prompt: str) -> Any:
+async def _send_message_with_retry(prompt: str) -> str:
     """Helper function to send a message to Gemini with retry logic."""
     logger.info("Generating answer with Gemini...")
-    return await chat_session.send_message(prompt)
+    response = await google_ai_client.aio.models.generate_content(
+        model=LLM_MODEL_IDENTIFIER,
+        contents=prompt
+    )
+    return response.text
 
 
-async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, str]:
+async def get_rag_answer(query: str, history: list[Message]) -> str:
     """
     Gets an answer from the RAG pipeline for a given query and chat session.
     Manages chat sessions in-memory.
@@ -271,22 +308,18 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
             detail="Server configuration error: clients are not available."
         )
 
-    # --- Chat Session Management ---
-    # If no session ID is provided, create a new one. This allows for conversation history.
-    if not chat_session_id or chat_session_id not in chat_sessions:
-        logger.info("Creating a new chat session...")
-        chat_session_id = str(uuid.uuid4())
-        llm_model_identifier = 'gemini-2.0-flash'
-        chat_sessions[chat_session_id] = google_ai_client.aio.chats.create(model=llm_model_identifier)
-
-    chat_session = chat_sessions[chat_session_id]
-
     try:
+        # If history exists, rewrite the query to include relevant context from the history.
+        # This is important for follow-up questions that may depend on previous interactions.
+        query_for_retrieval = query
+        if history:
+            query_for_retrieval = await _rewrite_query_with_history(history, query)
+
         # 1. Retrieve
-        logger.info("Embedding query: '%s'...", query)
+        logger.info("Embedding query: '%s'...", query_for_retrieval)
         embedding_response = await google_ai_client.aio.models.embed_content(
-            model="models/text-embedding-004",
-            contents=query,
+            model=EMBEDDING_MODEL_IDENTIFIER,
+            contents=query_for_retrieval,
             config=genai_types.EmbedContentConfig(task_type="RETRIEVAL_QUERY")
         )
         query_embedding = embedding_response.embeddings[0].values
@@ -309,23 +342,30 @@ async def get_rag_answer(query: str, chat_session_id: str | None) -> dict[str, s
             logger.warning("No relevant chunks found in Pinecone.")
 
         context_string = "\n\n---\n\n".join(context_chunks)
+        formatted_history = format_history_for_prompt(history, limit=10)
 
         prompt = f"""
-        Based ONLY on the following context, answer the question.
-        If the answer is not found in the context, state "I cannot answer this question based on the provided information."
+        You are a helpful and conversational assistant.
+        Answer the user's question based on the conversation history and the provided context.
+        The context below contains relevant information from a document.
+        Your answer should be based on the information in the context. If the context does not contain the information to answer the question, state that you cannot answer based on the provided document.
 
-        Context:
+        Conversation History:
+        {formatted_history}
+
+        Context from the document:
         {context_string}
 
-        Question: {query}
+        User's Current Question: {query}
 
-        Answer:
+        Helpful Answer:
         """
 
         # 3. Generate
-        response = await _send_message_with_retry(chat_session, prompt)
+        answer = await _send_message_with_retry(prompt)
 
-        return {"answer": response.text, "chat_session_id": chat_session_id}
+        logger.info("Generated answer: '%s'", answer)
+        return answer
 
     except Exception as e:
         logger.error("Error during RAG answer generation: %s", e)
