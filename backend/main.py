@@ -13,6 +13,7 @@ import uvicorn
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from tenacity import RetryError
+import logging
 
 # Import schemas and service functions
 from schemas import QueryRequest, QueryResponse, UploadResponse
@@ -23,6 +24,15 @@ import rag_service
 # This makes .env variables available to os.getenv() for the rag_service.
 load_dotenv()
 
+# Configure logging to capture debug information and errors.
+logging.basicConfig(
+    level=logging.INFO,  # Set to DEBUG for more verbose output
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+# Get a logger for this module.
+logger = logging.getLogger(__name__)
+
 
 # --- Lifespan Events ---
 # Use a lifespan context manager to initialize clients on startup and shut down gracefully.
@@ -30,13 +40,13 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     """Handles application startup and shutdown events."""
     # This block runs on application startup
-    print("--- Application Startup ---")
+    logger.info("--- Application Startup ---")
     rag_service.initialize_clients()
 
     yield
 
     # This block runs on application shutdown
-    print("--- Application Shutdown ---")
+    logger.info("--- Application Shutdown ---")
     await rag_service.close_clients()
 
 
@@ -68,6 +78,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     Accepts a file, extracts text, chunks, embeds, and stores it in Pinecone.
     """
     if file.content_type != "application/pdf":
+        logger.error("Invalid file type: '%s'. Expected PDF.", file.content_type)
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
     
     try:
@@ -84,10 +95,11 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         )
     except ValueError as e:
         # Handle specific value errors from the service (e.g., no text found)
+        logger.error("Value error during file upload: %s", e)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         # Handle other potential errors during processing
-        print(f"An unexpected error occurred during file upload: {e}")
+        logger.error("An unexpected error occurred during file upload: %s", e)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 
@@ -98,6 +110,7 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
     Manages chat history via a session ID.
     """
     if not request.query:
+        logger.error("Received an empty query.")
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     
     try:
@@ -105,13 +118,14 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         result = await rag_service.get_rag_answer(request.query, request.chat_session_id)
         return QueryResponse(answer=result["answer"], chat_session_id=result["chat_session_id"])
     except RetryError:
+        logger.error("AI model is overloaded. Retry limit exceeded.")
         raise HTTPException(
             status_code=503,  # 503 Service Unavailable
             detail="The AI model is currently overloaded. Please try again in a moment."
         )
     except Exception as e:
         # Handle unexpected errors during the RAG process
-        print(f"An unexpected error occurred during query processing: {e}")
+        logger.error("An unexpected error occurred during query processing: %s", e)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 
