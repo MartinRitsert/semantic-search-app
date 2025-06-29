@@ -60,6 +60,7 @@ export default function ChatPage() {
       handleFileUpload(file);
     } else {
       if (file) {
+        console.warn('Invalid file type:', file.type);
         setUploadState({ status: 'error', message: 'Please select a valid PDF file.' });
       }
     }
@@ -89,6 +90,7 @@ export default function ChatPage() {
         return;
     }
 
+    console.info('Starting file upload:', file.name);
     setUploadState({ status: 'loading', message: `Uploading "${file.name}"...` });
 
     const formData = new FormData();
@@ -107,6 +109,7 @@ export default function ChatPage() {
         }
 
         const data = await response.json();
+        console.info('File upload successful:', data);
         setUploadState({ 
             status: 'success', 
             message: `Success: "${data.filename}" is indexed. You can now ask questions.` 
@@ -117,6 +120,8 @@ export default function ChatPage() {
         setChatSessionId(null);
 
     } catch (err: unknown) {
+      console.error('Error during file upload:', err);
+
       let errorMessage = 'Upload failed. Please try again.';
       if (err instanceof Error) {
         errorMessage = err.message;
@@ -130,6 +135,8 @@ export default function ChatPage() {
   const handleSubmitQuery = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!query.trim()) return;
+
+    console.info('Submitting query:', query);
 
     // Optimistically update the UI with the user's message
     setMessages(prev => [...prev, { role: 'user', text: query }]);
@@ -153,10 +160,13 @@ export default function ChatPage() {
       }
 
       const data = await response.json();
+      console.info('Query response received:', data);
       setMessages(prev => [...prev, { role: 'bot', text: data.answer }]);
       setChatSessionId(data.chat_session_id);
 
     } catch (err: unknown) {
+      console.error('Error during query submission:', err);
+
       let errorMessage = 'An unexpected error occurred.';
       if (err instanceof Error) {
         errorMessage = err.message;
