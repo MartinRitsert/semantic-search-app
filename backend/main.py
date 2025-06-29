@@ -27,7 +27,7 @@ load_dotenv()
 
 # Configure logging to capture debug information and errors.
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG for more verbose output
+    level=logging.INFO,  # Set to DEBUG for more verbose output
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
@@ -36,10 +36,24 @@ logger = logging.getLogger(__name__)
 
 
 # --- STATE INITIALIZATION ---
-# In-memory storage for chat sessions.
-# For a production application, this should be replaced with a more persistent
-# and scalable solution like Redis, a database, or another caching mechanism
-# to handle multiple server instances and user sessions.
+# --- IMPORTANT: Production Architecture Note ---
+# The `chat_sessions` dictionary below stores all conversation data in local memory.
+# This makes the application STATEFUL and is not suitable for a production environment.
+#
+# The Problem with this Stateful Design:
+#   1. No Scalability: You cannot run multiple instances of this application behind a
+#      load balancer. A user's follow-up requests could be routed to a different
+#      server instance that does not have their chat history in its memory.
+#   2. No Persistence: If this single server instance restarts or crashes, all active
+#      conversation histories are permanently lost.
+#
+# The Solution for a Stateless, Scalable Backend:
+# In a production system, this session state must be externalized to a shared data
+# store. Each server instance would then be truly stateless, fetching and writing
+# session data from that central store.
+# 
+# Recommended solutions: Redis (for fast, ephemeral session caching) or a
+# database like PostgreSQL (for long-term, persistent storage).
 chat_sessions: dict[str, ChatSession] = {}
 
 

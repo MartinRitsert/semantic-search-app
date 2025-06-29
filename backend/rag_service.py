@@ -193,9 +193,17 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
             detail="Could not generate document embeddings. The embedding service may be down."
         )
 
-    # Before upserting a new document, clear all old data from the index.
-    # This keeps the demo simple, focusing on one document at a time.
-    # NOTE: In a multi-user app, one would use namespaces to isolate data.
+    # --- IMPORTANT: Production Architecture Note for Multi-Tenancy ---
+    # The code below uses a "single-tenant" approach by clearing the entire index
+    # (`delete_all=True`) on each upload. This is simple for a demo but is not
+    # viable for production as it creates a "last upload wins" system.
+    #
+    # The recommended production solution is to use a NAMESPACE PER USER.
+    # This approach assigns each user their own private partition in the index,
+    # enabling powerful cross-document search across their personal knowledge base.
+    # To distinguish between documents within a user's namespace, the unique
+    # `document_id` for each file would be stored as metadata with its vectors.
+    # Queries can then be filtered by this metadata to search within a specific document.
     try:
         index_stats = await pinecone_index.describe_index_stats()
         if index_stats.total_vector_count > 0:
