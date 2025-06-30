@@ -17,7 +17,7 @@ import {
  * Defines the structure for a single message in the chat history.
  */
 interface Message {
-  role: 'user' | 'bot';
+  role: 'user' | 'model';
   text: string;
 }
 
@@ -161,7 +161,7 @@ export default function ChatPage() {
 
       const data = await response.json();
       console.info('Query response received:', data);
-      setMessages(prev => [...prev, { role: 'bot', text: data.answer }]);
+      setMessages(prev => [...prev, { role: 'model', text: data.answer }]);
       setChatSessionId(data.chat_session_id);
 
     } catch (err: unknown) {
@@ -173,7 +173,7 @@ export default function ChatPage() {
       }
 
       setQueryState(prev => ({ ...prev, error: errorMessage }));
-      setMessages(prev => [...prev, { role: 'bot', text: "Sorry, I couldn't get a response. Please check the backend or try again." }]);
+      setMessages(prev => [...prev, { role: 'model', text: errorMessage }]);
     } finally {
       setQueryState(prev => ({ ...prev, isLoading: false }));
     }

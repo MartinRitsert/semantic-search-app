@@ -17,9 +17,10 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from pinecone import Pinecone, ServerlessSpec
 from google import genai
 from google.genai import types as genai_types
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 from typing import Any
 import logging
+from google.genai.errors import APIError
 
 # Import schemas
 from schemas import Message, format_history_for_prompt
@@ -296,12 +297,24 @@ async def _rewrite_query_with_history(history: list[Message], query: str) -> str
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
 async def _send_message_with_retry(prompt: str) -> str:
     """Helper function to send a message to Gemini with retry logic."""
-    logger.info("Generating answer with Gemini...")
-    response = await google_ai_client.aio.models.generate_content(
-        model=LLM_MODEL_IDENTIFIER,
-        contents=prompt
-    )
-    return response.text
+    try:
+        logger.info("Generating answer with Gemini...")
+        response = await google_ai_client.aio.models.generate_content(
+            model=LLM_MODEL_IDENTIFIER,
+            contents=prompt
+        )
+        return response.text
+    except APIError as e:
+        if e.code == 429:
+            logger.error("Gemini API error - Rate limit exceeded: %s", e)
+            raise HTTPException(
+                status_code=429,
+                detail="API rate limit exceeded. This is likely due to the free tier limit. Please try again later."
+            )
+    except Exception as e:
+        logger.error("Error generating answer with Gemini: %s", e)
+        # Re-raise other exceptions to allow the @retry decorator to work
+        raise
 
 
 async def get_rag_answer(query: str, history: list[Message]) -> str:
@@ -375,9 +388,24 @@ async def get_rag_answer(query: str, history: list[Message]) -> str:
         logger.info("Generated answer: '%s'", answer)
         return answer
 
+    except RetryError as e:
+        # Tenacity wraps the last exception. We need to unwrap it.
+        last_exception = e.last_attempt.result()
+        if isinstance(last_exception, HTTPException):
+            # If an HTTPException was already raised (e.g., 429 due to API rate limit),
+            # it is re-raised to let FastAPI handle it and send it to the frontend.
+            raise last_exception
+        else:
+            # The retries failed on an unexpected error.
+            logger.error("Error during RAG answer generation: %s", e)
+            raise HTTPException(
+                status_code=503,
+                detail="Failed to get an answer due to an external service error. Please try again later."
+            )
     except Exception as e:
+        # For any other unexpected error that didn't involve retries.
         logger.error("Error during RAG answer generation: %s", e)
         raise HTTPException(
-            status_code=503,
-            detail="Failed to get an answer due to an external service error. Please try again later."
+            status_code=500,
+            detail="An unexpected server error occurred."
         )
