@@ -39,7 +39,7 @@ export default function ChatPage() {
   // State for loading and status indicators
   const [queryState, setQueryState] = useState({ isLoading: false, error: null as string | null });
   const [uploadState, setUploadState] = useState({
-    status: 'idle', // 'idle' | 'loading' | 'success' | 'error'
+    status: 'idle',  // 'idle' | 'loading' | 'success' | 'error'
     message: ''
   });
 
@@ -305,12 +305,11 @@ export default function ChatPage() {
                   : "Upload a PDF before asking questions!"
               }
               className="flex-1 p-3 bg-gray-700 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-100 border border-transparent"
-              disabled={queryState.isLoading}
             />
             <button
               type="submit"
               className="bg-blue-600 p-3 rounded-full hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed transition-colors flex items-center justify-center w-12 h-12 shrink-0"
-              disabled={queryState.isLoading || !query.trim()}
+              disabled={uploadState.status === 'loading' || queryState.isLoading || !query.trim()}
             >
               {queryState.isLoading ? <LoadingSpinner /> : <SendIcon />}
             </button>
