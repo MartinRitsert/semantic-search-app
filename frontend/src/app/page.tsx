@@ -41,7 +41,7 @@ export default function ChatPage() {
   const [uploadState, setUploadState] = useState({
     status: 'idle',  // 'idle' | 'loading' | 'success' | 'success_with_delay' | 'error'
     message: '',
-    docId: null as string | null,
+    documentId: null as string | null,
     filename: null as string | null,
   });
 
@@ -56,7 +56,7 @@ export default function ChatPage() {
 
   // Polling for index readiness when in 'success_with_delay' state
   useEffect(() => {
-    if (uploadState.status !== 'success_with_delay' || !uploadState.docId) {
+    if (uploadState.status !== 'success_with_delay' || !uploadState.documentId) {
       return;
     }
 
@@ -67,7 +67,7 @@ export default function ChatPage() {
     const intervalId = setInterval(async () => {
       elapsed += pollInterval;
       try {
-        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${uploadState.docId}`;
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${uploadState.documentId}`;
         const response = await fetch(apiUrl);
         const data = await response.json();
 
@@ -82,7 +82,7 @@ export default function ChatPage() {
           setUploadState({
             status: 'error',
             message: "Indexing took too long (over 3 minutes). This may be due to a free-tier resource limit of the Pinecone vector database. Please try uploading your document again later.",
-            docId: null,
+            documentId: null,
             filename: null,
           });
           clearInterval(intervalId);
@@ -92,7 +92,7 @@ export default function ChatPage() {
         setUploadState({
           status: 'error',
           message: "An error occurred while checking document status. Please upload the document again.",
-          docId: null,
+          documentId: null,
           filename: null,
         });
         clearInterval(intervalId);
@@ -100,7 +100,7 @@ export default function ChatPage() {
     }, pollInterval);
 
     return () => clearInterval(intervalId);
-  }, [uploadState.status, uploadState.docId]);
+  }, [uploadState.status, uploadState.documentId]);
 
   // Handler for file input changes
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,7 +110,7 @@ export default function ChatPage() {
       setUploadState({
         status: 'idle',
         message: '',
-        docId: null,
+        documentId: null,
         filename: null
       });
       handleFileUpload(file);
@@ -120,7 +120,7 @@ export default function ChatPage() {
         setUploadState({
           status: 'error',
           message: 'Please select a valid PDF file.',
-          docId: null,
+          documentId: null,
           filename: null
         });
       }
@@ -150,7 +150,7 @@ export default function ChatPage() {
         setUploadState({
           status: 'error',
           message: 'Please select a file first.',
-          docId: null,
+          documentId: null,
           filename: null
         });
         return;
@@ -160,7 +160,7 @@ export default function ChatPage() {
     setUploadState({
       status: 'loading',
       message: `Uploading "${file.name}"...`,
-      docId: null,
+      documentId: null,
       filename: null
     });
 
@@ -191,14 +191,14 @@ export default function ChatPage() {
           setUploadState({
             status: 'success',
             message: `Success: "${data.filename}" is indexed. You can now ask questions.`,
-            docId: data.document_id,
+            documentId: data.document_id,
             filename: data.filename,
           });
         } else {
           setUploadState({
             status: 'success_with_delay',
             message: `Indexing "${data.filename}" is taking a moment... You can ask questions shortly.`,
-            docId: data.document_id,
+            documentId: data.document_id,
             filename: data.filename,
           });
         }
@@ -218,7 +218,7 @@ export default function ChatPage() {
       setUploadState({
         status: 'error',
         message: errorMessage,
-        docId: null,
+        documentId: null,
         filename: null
       });
     }
