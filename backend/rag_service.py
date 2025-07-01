@@ -236,7 +236,7 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     # a warning is printed before continuing, prioritizing a smooth demo experience.
     logger.info("Verifying index readiness...")
     test_vector_id = all_vectors_to_upsert[0]['id']
-    max_retries = 25
+    max_retries = 30
     retry_delay = 1  # seconds
 
     for i in range(max_retries):
