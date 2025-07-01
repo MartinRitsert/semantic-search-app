@@ -115,7 +115,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         result = await rag_service.process_and_index_document(file_content)
         
         return UploadResponse(
-            message="File processed and indexed successfully.", 
+            message="File upload received. The index may not be immediately ready for queries due to eventual consistency.",
             filename=file.filename,
             document_id=result["document_id"]
         )
