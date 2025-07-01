@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from tenacity import RetryError
 import uuid
 import logging
+from rich.logging import RichHandler
 
 # Import schemas and service functions
 from schemas import QueryRequest, QueryResponse, UploadResponse, ChatSession, MessageRole
@@ -27,8 +28,10 @@ load_dotenv()
 
 # Configure logging to capture debug information and errors.
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG for more verbose output
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level="DEBUG",  # Set to DEBUG for more verbose output
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[RichHandler(rich_tracebacks=True)]
 )
 
 # Get a logger for this module.

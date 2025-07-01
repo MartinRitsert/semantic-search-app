@@ -243,6 +243,7 @@ requests-toolbelt==1.0.0
     # via langsmith
 rich==14.0.0
     # via
+    #   -r requirements.in
     #   rich-toolkit
     #   typer
 rich-toolkit==0.14.7

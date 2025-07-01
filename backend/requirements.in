@@ -14,3 +14,4 @@ pytest-asyncio
 ipykernel
 tqdm
 pip-tools
+rich
