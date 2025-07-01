@@ -235,20 +235,14 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     # as a successful fetch confirms the index is ready. If the check fails after the timeout,
     # a warning is printed before continuing, prioritizing a smooth demo experience.
     logger.info("Verifying index readiness...")
-    test_vector_id = all_vectors_to_upsert[0]['id']
-    max_retries = 30
+    max_retries = 20
     retry_delay = 1  # seconds
 
     for i in range(max_retries):
-        try:
-            fetch_response = await pinecone_index.fetch(ids=[test_vector_id])
-            if fetch_response.vectors.get(test_vector_id):
-                logger.info("Index is ready. Found test vector '%s'.", test_vector_id)
-                break  # Exit the loop on success
-        except Exception as e:
-            logger.warning("Attempt %d/%d: Error during fetch: %s", i + 1, max_retries, e)
-
-        logger.debug("Attempt %d/%d: Waiting for index update... Test vector not found yet.", i + 1, max_retries)
+        is_ready = await check_index_readiness(document_id)
+        if is_ready:
+            break
+        logger.debug("Attempt %d/%d: Waiting for index update... Not ready yet.", i + 1, max_retries)
         await asyncio.sleep(retry_delay)
     else:
         # This 'else' block runs only if the loop finishes without a 'break'
@@ -256,65 +250,6 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
 
     logger.info("Document processing and indexing complete.")
     return {"document_id": document_id}
-
-
-async def _rewrite_query_with_history(history: list[Message], query: str) -> str:
-    """
-    Rewrites the user's query using chat history to create a standalone question.
-    """
-    logger.info("Rewriting query with chat history...")
-    
-    # Retrieve the last 10 messages (e.g. 5 user + 5 model) from the chat history.
-    formatted_history = format_history_for_prompt(history, limit=10)
-    logging.debug("Formatted chat history for rewriting: %s", formatted_history)
-
-    prompt = f"""
-    You are an expert at rephrasing user questions to be optimized for a vector database search.
-    Your task is to take the chat history and the user's new, potentially vague question, and rewrite it into a clear, standalone question.
-    This new question should be rich in keywords and context, making it ideal for finding relevant text chunks through semantic search.
-
-    Chat History:
-    {formatted_history}
-
-    New Question:
-    {query}
-
-    Standalone Question for Vector Search:
-    """
-    try:
-        response = await google_ai_client.aio.models.generate_content(
-            model=LLM_MODEL_IDENTIFIER,
-            contents=prompt
-        )
-        rewritten_query = response.text
-        logger.info("Original query: '%s' | Rewritten query: '%s'", query, rewritten_query)
-        return rewritten_query
-    except Exception as e:
-        logger.warning("Error during query rewriting: '%s'. Falling back to original query.", e)
-        return query
-    
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def _send_message_with_retry(prompt: str) -> str:
-    """Helper function to send a message to Gemini with retry logic."""
-    try:
-        logger.info("Generating answer with Gemini...")
-        response = await google_ai_client.aio.models.generate_content(
-            model=LLM_MODEL_IDENTIFIER,
-            contents=prompt
-        )
-        return response.text
-    except APIError as e:
-        if e.code == 429:
-            logger.error("Gemini API error - Rate limit exceeded: %s", e)
-            raise HTTPException(
-                status_code=429,
-                detail="API rate limit exceeded. This is likely due to the free tier limit. Please try again later."
-            )
-    except Exception as e:
-        logger.error("Error generating answer with Gemini: %s", e)
-        # Re-raise other exceptions to allow the @retry decorator to work
-        raise
 
 
 async def get_rag_answer(query: str, history: list[Message]) -> str:
@@ -409,3 +344,83 @@ async def get_rag_answer(query: str, history: list[Message]) -> str:
             status_code=500,
             detail="An unexpected server error occurred."
         )
+
+
+async def _rewrite_query_with_history(history: list[Message], query: str) -> str:
+    """
+    Rewrites the user's query using chat history to create a standalone question.
+    """
+    logger.info("Rewriting query with chat history...")
+    
+    # Retrieve the last 10 messages (e.g. 5 user + 5 model) from the chat history.
+    formatted_history = format_history_for_prompt(history, limit=10)
+    logging.debug("Formatted chat history for rewriting: %s", formatted_history)
+
+    prompt = f"""
+    You are an expert at rephrasing user questions to be optimized for a vector database search.
+    Your task is to take the chat history and the user's new, potentially vague question, and rewrite it into a clear, standalone question.
+    This new question should be rich in keywords and context, making it ideal for finding relevant text chunks through semantic search.
+
+    Chat History:
+    {formatted_history}
+
+    New Question:
+    {query}
+
+    Standalone Question for Vector Search:
+    """
+    try:
+        response = await google_ai_client.aio.models.generate_content(
+            model=LLM_MODEL_IDENTIFIER,
+            contents=prompt
+        )
+        rewritten_query = response.text
+        logger.info("Original query: '%s' | Rewritten query: '%s'", query, rewritten_query)
+        return rewritten_query
+    except Exception as e:
+        logger.warning("Error during query rewriting: '%s'. Falling back to original query.", e)
+        return query
+    
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
+async def _send_message_with_retry(prompt: str) -> str:
+    """Helper function to send a message to Gemini with retry logic."""
+    try:
+        logger.info("Generating answer with Gemini...")
+        response = await google_ai_client.aio.models.generate_content(
+            model=LLM_MODEL_IDENTIFIER,
+            contents=prompt
+        )
+        return response.text
+    except APIError as e:
+        if e.code == 429:
+            logger.error("Gemini API error - Rate limit exceeded: %s", e)
+            raise HTTPException(
+                status_code=429,
+                detail="API rate limit exceeded. This is likely due to the free tier limit. Please try again later."
+            )
+    except Exception as e:
+        logger.error("Error generating answer with Gemini: %s", e)
+        # Re-raise other exceptions to allow the @retry decorator to work
+        raise
+
+
+async def check_index_readiness(document_id: str) -> bool:
+    """Checks if the first chunk of a given document is queryable."""
+    if not pinecone_index:
+        return False
+    
+    try:
+        # We only need to check for the existence of the very first chunk's vector
+        test_vector_id = f"{document_id}_chunk_0"
+        fetch_response = await pinecone_index.fetch(ids=[test_vector_id])
+        # If the vector is found, the index is ready for this document
+        if fetch_response and hasattr(fetch_response, "vectors"):
+            vectors = fetch_response.vectors
+            if vectors and vectors.get(test_vector_id):
+                logger.info("Index is ready for document '%s'.", document_id)
+                return True
+        return False
+    except Exception as e:
+        logger.error("Error during index readiness check: %s", e)
+        return False

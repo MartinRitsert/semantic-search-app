@@ -18,7 +18,7 @@ import logging
 from rich.logging import RichHandler
 
 # Import schemas and service functions
-from schemas import QueryRequest, QueryResponse, UploadResponse, ChatSession, MessageRole
+from schemas import QueryRequest, QueryResponse, UploadResponse, ChatSession, MessageRole, StatusResponse
 import rag_service
 
 
@@ -169,6 +169,13 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         # Handle unexpected errors during the RAG process
         logger.error("An unexpected error occurred during query processing: %s", e)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+
+
+@app.get("/status/{document_id}", response_model=StatusResponse)
+async def get_document_status(document_id: str) -> StatusResponse:
+    """Endpoint to check if a document's vectors are ready to be queried."""
+    is_ready = await rag_service.check_index_readiness(document_id)
+    return StatusResponse(is_ready=is_ready)
 
 
 # --- Uvicorn Server ---

@@ -65,3 +65,7 @@ class UploadResponse(BaseModel):
     message: str
     filename: str
     document_id: str
+
+# Pydantic model for the status response.
+class StatusResponse(BaseModel):
+    is_ready: bool

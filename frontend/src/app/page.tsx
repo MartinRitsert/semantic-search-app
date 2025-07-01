@@ -39,8 +39,10 @@ export default function ChatPage() {
   // State for loading and status indicators
   const [queryState, setQueryState] = useState({ isLoading: false, error: null as string | null });
   const [uploadState, setUploadState] = useState({
-    status: 'idle',  // 'idle' | 'loading' | 'success' | 'error'
-    message: ''
+    status: 'idle',  // 'idle' | 'loading' | 'success' | 'success_with_delay' | 'error'
+    message: '',
+    docId: null as string | null,
+    filename: null as string | null,
   });
 
   // Refs for direct DOM element access
@@ -52,16 +54,75 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, queryState.isLoading]);
 
+  // Polling for index readiness when in 'success_with_delay' state
+  useEffect(() => {
+    if (uploadState.status !== 'success_with_delay' || !uploadState.docId) {
+      return;
+    }
+
+    const pollInterval = 5000; // 5 seconds
+    const maxPollingTime = 180000; // 3 minutes
+    let elapsed = 0;
+
+    const intervalId = setInterval(async () => {
+      elapsed += pollInterval;
+      try {
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${uploadState.docId}`;
+        const response = await fetch(apiUrl);
+        const data = await response.json();
+
+        if (data.is_ready) {
+          setUploadState(prev => ({
+            ...prev,
+            status: 'success',
+            message: `Success: "${prev.filename}" is indexed. You can now ask questions.`
+          }));
+          clearInterval(intervalId);
+        } else if (elapsed >= maxPollingTime) {
+          setUploadState({
+            status: 'error',
+            message: "Indexing took too long (over 3 minutes). This may be due to a free-tier resource limit of the Pinecone vector database. Please try uploading your document again later.",
+            docId: null,
+            filename: null,
+          });
+          clearInterval(intervalId);
+        }
+      } catch (error) {
+        console.error("Polling error:", error);
+        setUploadState({
+          status: 'error',
+          message: "An error occurred while checking document status. Please upload the document again.",
+          docId: null,
+          filename: null,
+        });
+        clearInterval(intervalId);
+      }
+    }, pollInterval);
+
+    return () => clearInterval(intervalId);
+  }, [uploadState.status, uploadState.docId]);
+
   // Handler for file input changes
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file && file.type === "application/pdf") {
-      setUploadState({ status: 'idle', message: '' }); // Clear previous errors
+      // Clear previous errors
+      setUploadState({
+        status: 'idle',
+        message: '',
+        docId: null,
+        filename: null
+      });
       handleFileUpload(file);
     } else {
       if (file) {
         console.warn('Invalid file type:', file.type);
-        setUploadState({ status: 'error', message: 'Please select a valid PDF file.' });
+        setUploadState({
+          status: 'error',
+          message: 'Please select a valid PDF file.',
+          docId: null,
+          filename: null
+        });
       }
     }
     // Reset file input to allow re-uploading the same file
@@ -86,12 +147,22 @@ export default function ChatPage() {
   // Handler for submitting the selected file to the backend
   const handleFileUpload = async (file: File) => {
     if (!file) {
-        setUploadState({ status: 'error', message: 'Please select a file first.' });
+        setUploadState({
+          status: 'error',
+          message: 'Please select a file first.',
+          docId: null,
+          filename: null
+        });
         return;
     }
 
     console.info('Starting file upload:', file.name);
-    setUploadState({ status: 'loading', message: `Uploading "${file.name}"...` });
+    setUploadState({
+      status: 'loading',
+      message: `Uploading "${file.name}"...`,
+      docId: null,
+      filename: null
+    });
 
     const formData = new FormData();
     formData.append('file', file);
@@ -109,12 +180,29 @@ export default function ChatPage() {
         }
 
         const data = await response.json();
-        console.info('File upload successful:', data);
-        setUploadState({ 
-            status: 'success', 
-            message: `Success: "${data.filename}" is indexed. You can now ask questions.` 
-        });
-        
+
+        // Call the status endpoint to check readiness
+        const statusUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${data.document_id}`;
+        const statusResp = await fetch(statusUrl);
+        const statusData = await statusResp.json();
+
+        if (statusData.is_ready) {
+          console.info(`File "${data.filename}" indexed successfully.`);
+          setUploadState({
+            status: 'success',
+            message: `Success: "${data.filename}" is indexed. You can now ask questions.`,
+            docId: data.document_id,
+            filename: data.filename,
+          });
+        } else {
+          setUploadState({
+            status: 'success_with_delay',
+            message: `Indexing "${data.filename}" is taking a moment... You can ask questions shortly.`,
+            docId: data.document_id,
+            filename: data.filename,
+          });
+        }
+
         // Reset chat state after a new document is successfully indexed
         setMessages([]);
         setChatSessionId(null);
@@ -127,7 +215,12 @@ export default function ChatPage() {
         errorMessage = err.message;
       }
       
-      setUploadState({ status: 'error', message: errorMessage });
+      setUploadState({
+        status: 'error',
+        message: errorMessage,
+        docId: null,
+        filename: null
+      });
     }
   };
 
@@ -233,13 +326,19 @@ export default function ChatPage() {
                     className={`flex items-center space-x-3 p-3 rounded-lg border text-sm shadow-lg
                         ${uploadState.status === 'loading' && 'bg-gray-700/60 border-gray-600/80 text-gray-300'}
                         ${uploadState.status === 'success' && 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]'}
-                        ${uploadState.status === 'error' && 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'}`
+                        ${uploadState.status === 'error' && 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'}
+                        ${uploadState.status === 'success_with_delay' && 'bg-orange-900/20 border-orange-500/30 text-orange-300 shadow-[0_0_15px_rgba(251,146,60,0.2)]'}`
                     }
                 >
                     {uploadState.status === 'loading' && <ClockIcon />}
                     {uploadState.status === 'success' && <CheckIcon />}
                     {uploadState.status === 'error' && <WarningIcon />}
-                    <span>{uploadState.message}</span>
+                    {uploadState.status === 'success_with_delay' && <ClockIcon />}
+                    <span>
+                      {uploadState.status === 'success_with_delay'
+                        ? "Indexing is taking a moment... You can ask questions shortly."
+                        : uploadState.message}
+                    </span>
                 </div>
             </div>
         )}
@@ -309,7 +408,11 @@ export default function ChatPage() {
             <button
               type="submit"
               className="bg-blue-600 p-3 rounded-full hover:bg-blue-700 disabled:bg-blue-800 disabled:cursor-not-allowed transition-colors flex items-center justify-center w-12 h-12 shrink-0"
-              disabled={uploadState.status === 'loading' || queryState.isLoading || !query.trim()}
+              disabled={
+                uploadState.status !== 'success' ||
+                queryState.isLoading ||
+                !query.trim()
+              }
             >
               {queryState.isLoading ? <LoadingSpinner /> : <SendIcon />}
             </button>
