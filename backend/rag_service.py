@@ -357,10 +357,27 @@ async def _rewrite_query_with_history(history: list[Message], query: str) -> str
     logging.debug("Formatted chat history for rewriting: %s", formatted_history)
 
     prompt = f"""
-    You are an expert at rephrasing user questions to be optimized for a vector database search.
-    Your task is to take the chat history and the user's new, potentially vague question, and rewrite it into a clear, standalone question.
-    This new question should be rich in keywords and context, making it ideal for finding relevant text chunks through semantic search.
+    Your sole task is to rephrase a follow-up question into a standalone question based on a chat history.
+    If the question is already standalone, return it as is.
+    DO NOT add any conversational text, preamble, or explanation. Your output must ONLY be the rewritten query.
 
+    ---
+    EXAMPLE:
+    Chat History:
+    user:
+    Tell me about your RAG application.
+
+    model:
+    It's a full-stack application using FastAPI and Next.js.
+
+    New Question:
+    and the database?
+
+    Standalone Question for Vector Search:
+    What database does the RAG application use?
+    ---
+
+    YOUR TASK:
     Chat History:
     {formatted_history}
 
