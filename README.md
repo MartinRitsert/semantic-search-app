@@ -40,4 +40,4 @@ To test the document querying functionality inside the .ipynb notebooks with the
 * **Paper Link:** Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., ... & Polosukhin, I. (2017). Attention is all you need. https://arxiv.org/abs/1706.03762
 * **Required Local Path:** For the application's current configuration to process this specific document (or others you wish to test locally), please download the PDF and place it in a data directory at the root of this project. For this example paper, the path would be: "data/Attention Is All You Need.pdf".
 
-*This README provides an overview based on the project's current development stage (as of June 2025). More details and code will be added very soon.*
+*This README provides an overview based on the project's current development stage (as of July 2025). More details and code will be added very soon.*
