@@ -1,6 +1,9 @@
 # 🔎 Semantic Search Application with RAG
 Status: Work in Progress 👨‍💻 (Actively Under Development)
 
+## 🎬 Application Preview
+https://github.com/user-attachments/assets/8a92bdc7-c560-4633-85e7-439a44024673
+
 ## 🎯 Purpose
 This project focuses on developing an advanced semantic search and question-answering application. The primary goal is to enable users to effectively query custom or lengthy documents, overcoming common limitations of standard Large Language Models (LLMs) related to context window sizes and access to specific, private knowledge sources. This is achieved by implementing a robust Retrieval-Augmented Generation (RAG) pipeline.
 
