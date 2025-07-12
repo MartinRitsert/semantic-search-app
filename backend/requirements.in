@@ -8,6 +8,7 @@ google-genai
 pinecone[asyncio]
 tenacity
 httpx
+sqlalchemy
 
 # --- Development & Testing Dependencies ---
 pytest

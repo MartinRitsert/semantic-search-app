@@ -27,6 +27,9 @@ interface Message {
  * state management, and API interactions for the RAG application.
  */
 export default function ChatPage() {
+  // State for the user ID
+  const [userId, setUserId] = useState<string | null>(null);
+
   // State for the conversation history
   const [messages, setMessages] = useState<Message[]>([]);
 
@@ -52,6 +55,23 @@ export default function ChatPage() {
   // State for managing the "taking longer" message
   const [showTakingLonger, setShowTakingLonger] = useState<boolean>(false);
 
+  // Effect to get or create a user ID on first load
+  useEffect(() => {
+    const getOrCreateUser = async () => {
+      let existingUserId = localStorage.getItem('ragAppUserId');
+      if (existingUserId) {
+        setUserId(existingUserId);
+      } else {
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/users/`;
+        const response = await fetch(apiUrl, { method: 'POST' });
+        const data = await response.json();
+        localStorage.setItem('ragAppUserId', data.user_id);
+        setUserId(data.user_id);
+      }
+    };
+    getOrCreateUser();
+  }, []);
+
   // Effect to auto-scroll to the latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -68,7 +88,7 @@ export default function ChatPage() {
       setShowTakingLonger(true);
     }, 16000);
 
-    const pollInterval = 3000;  // Poll every 3 seconds
+    const pollInterval = 2000;  // Poll every 2 seconds
 
     const intervalId = setInterval(async () => {
       try {
@@ -146,9 +166,22 @@ export default function ChatPage() {
 
   // Handler for submitting the selected file to the backend
   const handleFileUpload = async (file: File) => {
+    if (!userId) {
+      console.error('User ID is not set. Cannot upload file.');
+      setUploadState({
+        status: 'failed',
+        message: 'User session not initialized. Please refresh.',
+        documentId: null,
+        filename: null
+      });
+      return;
+    }
+
     setShowTakingLonger(false);
+
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('user_id', userId);
 
     try {
       const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/upload/`;
@@ -199,7 +232,7 @@ export default function ChatPage() {
 
     console.info('Submitting query:', query);
 
-    // Optimistically update the UI with the user's message
+    // Update the UI with the user's message
     setMessages(prev => [...prev, { role: 'user', text: query }]);
     setQueryState({ isLoading: true, error: null });
     setQuery('');
@@ -212,6 +245,8 @@ export default function ChatPage() {
         body: JSON.stringify({
           query: query,
           chat_session_id: chatSessionId,
+          document_id: uploadState.documentId,
+          user_id: userId,
         }),
       });
 

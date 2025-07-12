@@ -216,34 +216,7 @@ async def process_and_index_document(file_content: bytes, document_id: str) -> N
         )
 
     # --- 4. Upsert Vectors to Pinecone ---
-    # --- IMPORTANT: Production Architecture Note for Multi-Tenancy ---
-    # The code below uses a "single-tenant" approach by clearing the entire index
-    # (`delete_all=True`) on each upload. This is simple for a demo but is not
-    # viable for production as it creates a "last upload wins" system.
-    #
-    # The recommended production solution is to use a NAMESPACE PER USER.
-    # This approach assigns each user their own private partition in the index,
-    # enabling powerful cross-document search across their personal knowledge base.
-    # To distinguish between documents within a user's namespace, the unique
-    # `document_id` for each file would be stored as metadata with its vectors.
-    # Queries can then be filtered by this metadata to search within a specific document.
     pinecone_upsert_batch_size = 100  # Pinecone's recommended upsert batch size
-
-    try:
-        logger.info("Checking default namespace in Pinecone for existing data...")
-        index_stats = await pinecone_index.describe_index_stats()
-        if index_stats.total_vector_count > 0:
-            logger.info("Clearing previous data from index...")
-            await pinecone_index.delete(delete_all=True)
-            logger.info("Initiated clearing of default namespace.")
-        else:
-            logger.info("Index is already empty. No need to clear.")
-    except Exception as e:
-        logger.error("Failed to clear Pinecone index: %s", e)
-        raise HTTPException(
-            status_code=503,
-            detail="Could not prepare the vector database for document upload. Please try again."
-        )
 
     logger.info("Upserting %d vectors to Pinecone...", len(all_vectors_to_upsert))
     target_lsn = None
@@ -254,7 +227,7 @@ async def process_and_index_document(file_content: bytes, document_id: str) -> N
             # Use httpx client to get response headers for LSN
             response = await pinecone_http_client.post(
                 url="/vectors/upsert",
-                json={"vectors": batch}
+                json={"vectors": batch, "namespace": document_id},
             )
             response.raise_for_status()
 
@@ -280,39 +253,33 @@ async def process_and_index_document(file_content: bytes, document_id: str) -> N
     # queryability test using the Log Sequence Number (LSN). If the check fails after the
     # timeout, a warning is printed before continuing, prioritizing a smooth demo experience.
     logger.info("Verifying index consistency...")
-    if target_lsn:
-        logger.info("Last upsert returned LSN: %d. Waiting for index to catch up...", target_lsn)
-        is_ready = False
-        max_retries = 30
-        for i in range(max_retries):
-            is_ready = await check_index_consistency(target_lsn)
-            if is_ready:
-                # Add a pragmatic 2-second buffer to mitigate a subtle race condition
-                # inherent in eventually consistent systems. This delay ensures data has
-                # fully propagated across all query replicas, preventing read-after-write
-                # inconsistencies on the first query after an upsert.
-                logger.info("Consistency met. Adding a 5-second buffer for index to settle.")
-                # TODO: This is still not enough. Thus, a separate namespace for each document would be beneficial.
-                # TODO: This will be implemented in future versions by introducing a database making the backend fully stateless.
 
-                await asyncio.sleep(5)
-                break
-            logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, max_retries)
-            await asyncio.sleep(1)
-        else:
-            logger.warning("Index consistency could not be confirmed after %d seconds.", max_retries)
-            raise TimeoutError("Failed to prepare document for queries in time. Please upload document again. If this issue persists, try again later.")
+    if not target_lsn:
+        logger.error("Could not retrieve LSN from upsert response.")
+        raise RuntimeError("Failed to retrieve LSN after upserting document.")
+
+    logger.info("Last upsert returned LSN: %d. Waiting for index to catch up...", target_lsn)
+    is_ready = False
+    max_retries = 45
+
+    for i in range(max_retries):
+        is_ready = await check_index_consistency(target_lsn, document_id)
+        if is_ready:
+            logger.info("Consistency met. Index is ready for queries.")
+            break
+
+        logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, max_retries)
+        await asyncio.sleep(1)
+
     else:
-        logger.warning("Could not retrieve LSN from upsert response. Skipping consistency check. Defaulting to a waiting state of 20 seconds.")
-        # If we can't verify, add a generic sleep time as a fallback.
-        await asyncio.sleep(20)
-        is_ready = True
+        logger.warning("Index consistency could not be confirmed after %d seconds.", max_retries)
+        raise TimeoutError("Failed to prepare document for queries in time. Please upload document again. If this issue persists, try again later.")
 
     # --- Document Processing Complete ---
     logger.info("Document with ID %s processed and indexed successfully.", document_id)
 
 
-async def get_rag_answer(query: str, history: list[Message]) -> str:
+async def get_rag_answer(query: str, history: list[Message], document_id: str) -> str:
     """
     Gets an answer from the RAG pipeline for a given query and chat session.
     Manages chat sessions in-memory.
@@ -343,6 +310,7 @@ async def get_rag_answer(query: str, history: list[Message]) -> str:
         logger.info("Querying Pinecone...")
         query_results = await pinecone_index.query(
             vector=query_embedding,
+            namespace=document_id,
             top_k=5,  # Using 5 for more consistent results based on earlier experiments
             include_metadata=True
         )
@@ -482,7 +450,7 @@ async def _send_message_with_retry(prompt: str) -> str:
         raise
 
 
-async def check_index_consistency(target_lsn: int) -> bool:
+async def check_index_consistency(target_lsn: int, namespace: str) -> bool:
     """Checks if the index has reached or passed a target Log Sequence Number (LSN).
     If it has reached or exceeded the target LSN, it is considered consistent and ready for queries."""
     if not pinecone_http_client:
@@ -496,6 +464,7 @@ async def check_index_consistency(target_lsn: int) -> bool:
             json={
                 "vector": dummy_vector,
                 "topK": 1,
+                "namespace": namespace,
             }
         )
         response.raise_for_status()
@@ -519,3 +488,13 @@ async def check_index_consistency(target_lsn: int) -> bool:
     except Exception as e:
         logger.error("Error during index consistency check: %s", e)
         return False
+        
+
+async def delete_namespace(namespace: str):
+    """Deletes all vectors from a specific namespace in Pinecone."""
+    try:
+        logger.info(f"Issuing delete command for namespace: '{namespace}'")
+        await pinecone_index.delete(delete_all=True, namespace=namespace)
+        logger.info(f"Delete command for namespace '{namespace}' acknowledged.")
+    except Exception as e:
+        logger.error(f"Failed to issue delete for namespace '{namespace}': {e}")        

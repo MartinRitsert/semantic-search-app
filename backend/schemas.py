@@ -34,19 +34,6 @@ def format_history_for_prompt(history: list[Message], limit: int | None = None) 
         
     return "\n\n".join([f"{message.role.value}:\n{message.text}" for message in messages])
 
-# Pydantic model for the internal representation of a chat session.
-class ChatSession(BaseModel):
-    """Manages the state and history of a chat session."""
-    history: list[Message] = Field(default_factory=list)
-
-    def add_message(self, role: MessageRole, text: str) -> None:
-        """Adds a new message to the session's history."""
-        self.history.append(Message(role=role, text=text))
-
-    def get_formatted_history(self, limit: int | None = None) -> str:
-        """Creates a formatted string of the history for the LLM prompt."""
-        return format_history_for_prompt(self.history, limit)
-
 
 #--- API Request / Response Schemas ---
 
@@ -56,6 +43,8 @@ class QueryRequest(BaseModel):
     """
     query: str
     chat_session_id: str | None = None  # Optional session ID for multi-turn conversations
+    document_id: str
+    user_id: str
 
 class QueryResponse(BaseModel):
     """
@@ -78,3 +67,9 @@ class StatusResponse(BaseModel):
     status: str
     message: str | None = None
     filename: str | None = None
+
+class UserResponse(BaseModel):
+    """
+    Response model for when a new user is created.
+    """
+    user_id: str

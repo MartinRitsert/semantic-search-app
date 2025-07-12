@@ -4,6 +4,10 @@
 # Documents used for testing purposes
 data/
 
+# Database files
+*.sqlite3
+*.db
+
 # Others
 .DS_Store
 __pycache__/

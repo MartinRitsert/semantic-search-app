@@ -7,18 +7,23 @@ and CORS middleware for frontend communication.
 """
 
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import Body, FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import asyncio
+import time
+import database
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from tenacity import RetryError
+from sqlalchemy.orm import Session
 import uuid
+from typing import Generator
 import logging
 from rich.logging import RichHandler
 
 # Import schemas and service functions
-from schemas import QueryRequest, QueryResponse, UploadAcceptResponse, ChatSession, MessageRole, StatusResponse
+from schemas import Message, QueryRequest, QueryResponse, UploadAcceptResponse, MessageRole, StatusResponse, UserResponse
 import rag_service
 
 
@@ -38,40 +43,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# --- STATE INITIALIZATION ---
-# --- IMPORTANT: Production Architecture Note ---
-# The `chat_sessions` dictionary below stores all conversation data in local memory.
-# This makes the application STATEFUL and is not suitable for a production environment.
-#
-# The Problem with this Stateful Design:
-#   1. No Scalability: You cannot run multiple instances of this application behind a
-#      load balancer. A user's follow-up requests could be routed to a different
-#      server instance that does not have their chat history in its memory.
-#   2. No Persistence: If this single server instance restarts or crashes, all active
-#      conversation histories are permanently lost.
-#
-# The Solution for a Stateless, Scalable Backend:
-# In a production system, this session state must be externalized to a shared data
-# store. Each server instance would then be truly stateless, fetching and writing
-# session data from that central store.
-# 
-# Recommended solutions: Redis (for fast, ephemeral session caching) or a
-# database like PostgreSQL (for long-term, persistent storage).
-chat_sessions: dict[str, ChatSession] = {}
-
-# --- IMPORTANT: Production Architecture Note ---
-# The Solution for a Stateless, Scalable Backend:
-# In a production system, this session state must be externalized to a shared data
-# store. Each server instance would then be truly stateless, fetching and writing
-# session data from that central store.
-# 
-# Recommended solutions: Redis (for fast, ephemeral session caching) or a
-# database like PostgreSQL (for long-term, persistent storage).
-
-# In-memory "database" to track the status of background tasks
-tasks: dict[str, dict] = {}
-
-
 # --- Lifespan Events ---
 # Use a lifespan context manager to initialize clients on startup and shut down gracefully.
 @asynccontextmanager
@@ -79,6 +50,12 @@ async def lifespan(app: FastAPI):
     """Handles application startup and shutdown events."""
     # This block runs on application startup
     logger.info("--- Application Startup ---")
+
+    # Initialize the database on startup
+    database.init_db()
+    asyncio.create_task(periodic_cleanup_task())  # Start the periodic cleanup task for old sessions
+
+    # Initialize the RAG service clients
     rag_service.initialize_clients()
 
     yield
@@ -108,11 +85,31 @@ app.add_middleware(
 )
 
 
+def get_db() -> Generator[Session, None, None]:
+    db = database.SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
 # --- API Endpoints ---
+@app.post("/users/", response_model=UserResponse)
+async def create_user(db: Session = Depends(get_db)) -> UserResponse:
+    """Create a new anonymous user and return the ID."""
+    user_id = str(uuid.uuid4())
+    new_user = database.User(id=user_id)
+    db.add(new_user)
+    db.commit()
+    return UserResponse(user_id=user_id)
+
+
 @app.post("/upload/", status_code=202, response_model=UploadAcceptResponse)
 async def upload_document(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
+    user_id: str = Body(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ) -> UploadAcceptResponse:
     """
     Endpoint to upload a PDF file for processing and indexing.
@@ -122,24 +119,39 @@ async def upload_document(
         logger.error("Invalid file type: '%s'. Expected PDF.", file.content_type)
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
     
-    file_content = await file.read()
-    document_id = str(uuid.uuid4())
-    
-    # Immediately store the initial task status
-    tasks[document_id] = {"status": "processing", "filename": file.filename}
+    try:
+        file_content = await file.read()
+        new_document_id = str(uuid.uuid4())
+        
+        # Find the previous document uploaded by this user, if any.
+        previous_doc = (db.query(database.Document)
+            .filter(database.Document.user_id == user_id)
+            .order_by(database.Document.creation_time.desc())
+            .first())
 
-    # Add the long-running job to be run in the background
-    background_tasks.add_task(process_document_in_background, document_id, file_content)
+        # Create a new document record in the database
+        new_doc = database.Document(id=new_document_id, filename=file.filename, user_id=user_id)
+        db.add(new_doc)
+        db.commit()
 
-    # Immediately return the ID so the frontend isn't blocked
-    return UploadAcceptResponse(
-        message="File upload accepted for processing.",
-        document_id=document_id
-    )
+        # Add the processing and cleanup tasks to the background
+        background_tasks.add_task(process_document_in_background, new_document_id, file_content)
+        if previous_doc is not None:
+            background_tasks.add_task(rag_service.delete_namespace, previous_doc.id)
+
+        # Immediately return the ID to prevent blocking the frontend.
+        return UploadAcceptResponse(
+            message="File upload accepted for processing.",
+            document_id=new_document_id
+        )
+    except Exception as e:
+        logger.error("Error during file upload acceptance: %s", e)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not accept file for upload.")
 
 
 @app.post("/query/", response_model=QueryResponse)
-async def answer_query(request: QueryRequest) -> QueryResponse:
+async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
     """
     Endpoint to receive a user query and return a RAG-generated answer.
     Manages chat history via a session ID.
@@ -149,27 +161,43 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     
     chat_session_id = request.chat_session_id
-
-    # 1. Manage State: Look up the session or create a new one.
-    if not chat_session_id or chat_session_id not in chat_sessions:
-        chat_session_id = str(uuid.uuid4())
-        chat_sessions[chat_session_id] = ChatSession()
-        logger.info("Created new chat session with ID: %s", chat_session_id)
-
-    chat_session = chat_sessions[chat_session_id]
+    current_history = []
 
     try:
+        # 1. Manage State: Look up the chat session or create a new one.
+        if chat_session_id:
+            chat_session = db.query(database.ChatSession).filter(
+                database.ChatSession.id == chat_session_id,
+                database.ChatSession.user_id == request.user_id
+            ).first()
+            if not chat_session:
+                raise HTTPException(status_code=404, detail="Chat session not found.")
+            # Load history from the database record
+            current_history = [Message(**msg) for msg in chat_session.history]
+        else:
+            chat_session_id = str(uuid.uuid4())
+            chat_session = database.ChatSession(
+                id=chat_session_id,
+                document_id=request.document_id,
+                user_id=request.user_id
+            )
+            db.add(chat_session)
+            logger.info("Created new chat session with ID: %s", chat_session_id)
+
         # 2. Call Service: Pass the query and history to the stateless service function.
         logger.info("Passing query to RAG service for session: %s", chat_session_id)
-        answer = await rag_service.get_rag_answer(request.query, chat_session.history)
-        
+        answer = await rag_service.get_rag_answer(request.query, current_history, request.document_id)
+
         # 3. Update State: Save the new user message and model answer to the session.
-        chat_session.add_message(role=MessageRole.USER, text=request.query)
-        chat_session.add_message(role=MessageRole.MODEL, text=answer)
+        current_history.append(Message(role=MessageRole.USER, text=request.query))
+        current_history.append(Message(role=MessageRole.MODEL, text=answer))
+        chat_session.history = current_history
+        db.commit()
         
         return QueryResponse(answer=answer, chat_session_id=chat_session_id)
     except RetryError:
         logger.error("AI model is overloaded. Retry limit exceeded.")
+        db.rollback()
         raise HTTPException(
             status_code=503,
             detail="The AI model is currently overloaded. Please try again in a moment."
@@ -177,31 +205,79 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
     except Exception as e:
         # Handle unexpected errors during the RAG process
         logger.error("An unexpected error occurred during query processing: %s", e)
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 
 
 @app.get("/upload/status/{document_id}", response_model=StatusResponse)
-async def get_upload_status(document_id: str) -> StatusResponse:
-    task = tasks.get(document_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found.")
-    return StatusResponse(**task)
+async def get_upload_status(document_id: str, db: Session = Depends(get_db)) -> StatusResponse:
+    try:
+        # Fetch the task status from the database
+        doc = db.query(database.Document).filter(database.Document.id == document_id).first()
+        if not doc:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        return StatusResponse(status=doc.status, message=doc.message, filename=doc.filename)
+    except Exception as e:
+        logger.error("Error fetching status for doc %s: %s", document_id, e)
+        raise HTTPException(status_code=500, detail="Could not fetch upload status.")
+    
 
-
-# --- NEW: Add a helper function to run the processing ---
+# --- Background Processing ---
 async def process_document_in_background(document_id: str, file_content: bytes) -> None:
     """Helper to run the heavy processing of document indexing outside of the main request."""
+    # Get a new database session for this background task
+    db = database.SessionLocal()
+
     try:
+        doc = db.query(database.Document).filter(database.Document.id == document_id).first()
+        if not doc:
+            logger.error("Background task started for non-existent document ID: %s", document_id)
+            return
+        
         await rag_service.process_and_index_document(file_content, document_id)
-        # Update the task status upon success
-        tasks[document_id]['status'] = 'success'
-        tasks[document_id]['message'] = f'Successfully indexed "{tasks[document_id]["filename"]}".'
+        doc.status = 'success'
+        doc.message = f'Successfully indexed "{doc.filename}".'
+        db.commit()
     except Exception as e:
         logger.error("Background processing failed for doc %s: %s", document_id, e)
-        # Update the task status upon failure
-        tasks[document_id]['status'] = 'failed'
-        tasks[document_id]['message'] = str(e)
+        db.rollback()
+        if doc:
+            doc.status = 'failed'
+            doc.message = "An error occurred during processing."
+            db.commit()
+    finally:
+        db.close()
+
+
+async def periodic_cleanup_task(ttl_hours: int = 24) -> None:
+    """Periodically cleans up old documents and their namespaces."""
+    while True:
+        await asyncio.sleep(3600)  # Run once per hour
+        db = database.SessionLocal()
+        try:
+            logger.info("Cleanup Task: Checking for expired documents...")
+            TTL_SECONDS = ttl_hours * 3600  # Convert hours to seconds
+            cutoff_time = time.time() - TTL_SECONDS
+            
+            expired_docs = db.query(database.Document).filter(database.Document.creation_time < cutoff_time).all()
+            if not expired_docs:
+                logger.info("Cleanup Task: No expired documents found.")
+                continue
+
+            for doc in expired_docs:
+                logger.info(f"Cleanup Task: Deleting expired document and namespace '{doc.id}'...")
+                await rag_service.delete_namespace(doc.id)
+                db.delete(doc)
+            db.commit()
+            logger.info("Cleanup Task: Successfully deleted %d expired documents.", len(expired_docs))
+
+        except Exception as e:
+            logger.error("Cleanup Task Error: %s", e)
+            db.rollback()
+        finally:
+            db.close()
+
 
 
 # --- Uvicorn Server ---
