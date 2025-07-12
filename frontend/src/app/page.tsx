@@ -39,7 +39,7 @@ export default function ChatPage() {
   // State for loading and status indicators
   const [queryState, setQueryState] = useState({ isLoading: false, error: null as string | null });
   const [uploadState, setUploadState] = useState({
-    status: 'idle',  // 'idle' | 'loading' | 'success' | 'success_with_delay' | 'error'
+    status: 'idle',  // 'idle' | 'processing' | 'success' | 'failed'
     message: '',
     documentId: null as string | null,
     filename: null as string | null,
@@ -49,57 +49,57 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // State for managing the "taking longer" message
+  const [showTakingLonger, setShowTakingLonger] = useState<boolean>(false);
+
   // Effect to auto-scroll to the latest message
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, queryState.isLoading]);
 
-  // Polling for index readiness when in 'success_with_delay' state
+  // Polling for index readiness when in 'processing' state
   useEffect(() => {
-    if (uploadState.status !== 'success_with_delay' || !uploadState.documentId) {
+    if (uploadState.status !== 'processing' || !uploadState.documentId) {
       return;
     }
 
-    const pollInterval = 5000; // 5 seconds
-    const maxPollingTime = 180000; // 3 minutes
-    let elapsed = 0;
+    // Timer for the "taking longer" message
+    const takingLongerTimeout = setTimeout(() => {
+      setShowTakingLonger(true);
+    }, 16000);
+
+    const pollInterval = 3000;  // Poll every 3 seconds
 
     const intervalId = setInterval(async () => {
-      elapsed += pollInterval;
       try {
-        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${uploadState.documentId}`;
+        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/upload/status/${uploadState.documentId}`;
         const response = await fetch(apiUrl);
-        const data = await response.json();
 
-        if (data.is_ready) {
-          setUploadState(prev => ({
-            ...prev,
-            status: 'success',
-            message: `Success: "${prev.filename}" is indexed. You can now ask questions.`
-          }));
+        if (!response.ok) throw new Error('Status check failed');
+
+        const data = await response.json(); // e.g., {status: 'success', message: '...'}
+
+        // If the task is done (either success or fail), stop polling and update the UI.
+        if (data.status === 'success' || data.status === 'failed') {
           clearInterval(intervalId);
-        } else if (elapsed >= maxPollingTime) {
-          setUploadState({
-            status: 'error',
-            message: "Indexing took too long (over 3 minutes). This may be due to a free-tier resource limit of the Pinecone vector database. Please try uploading your document again later.",
-            documentId: null,
-            filename: null,
-          });
-          clearInterval(intervalId);
+          setShowTakingLonger(false); 
+          setUploadState(prev => ({ ...prev, status: data.status, message: data.message || data.error }));
         }
+        // If the status is still 'processing', the interval will just continue.
+
       } catch (error) {
         console.error("Polling error:", error);
-        setUploadState({
-          status: 'error',
-          message: "An error occurred while checking document status. Please upload the document again.",
-          documentId: null,
-          filename: null,
-        });
         clearInterval(intervalId);
+        setShowTakingLonger(false);
+        setUploadState(prev => ({ ...prev, status: 'failed', message: 'Error checking processing status.' }));
       }
     }, pollInterval);
 
-    return () => clearInterval(intervalId);
+    // Cleanup function: important to clear both timeouts
+    return () => {
+      clearInterval(intervalId);
+      clearTimeout(takingLongerTimeout);
+    };
   }, [uploadState.status, uploadState.documentId]);
 
   // Handler for file input changes
@@ -146,77 +146,45 @@ export default function ChatPage() {
 
   // Handler for submitting the selected file to the backend
   const handleFileUpload = async (file: File) => {
-    if (!file) {
-        setUploadState({
-          status: 'error',
-          message: 'Please select a file first.',
-          documentId: null,
-          filename: null
-        });
-        return;
-    }
-
-    console.info('Starting file upload:', file.name);
-    setUploadState({
-      status: 'loading',
-      message: `Uploading "${file.name}"...`,
-      documentId: null,
-      filename: null
-    });
-
+    setShowTakingLonger(false);
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-        const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/upload/`;
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            body: formData,
-        });
+      const apiUrl = `${process.env.NEXT_PUBLIC_API_URL}/upload/`;
+      const response = await fetch(apiUrl, { method: 'POST', body: formData });
+      
+      if (response.status !== 202) {  // Expecting a 202 Accepted status
+          const errorData = await response.json();
+          throw new Error(errorData.detail || "File upload failed.");
+      }
 
-        if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.detail || "File upload failed.");
-        }
+      const data = await response.json();
 
-        const data = await response.json();
+      // Reset chat messages and session ID
+      setMessages([]);
+      setChatSessionId(null);
 
-        // Call the status endpoint to check readiness
-        const statusUrl = `${process.env.NEXT_PUBLIC_API_URL}/status/${data.document_id}`;
-        const statusResp = await fetch(statusUrl);
-        const statusData = await statusResp.json();
-
-        if (statusData.is_ready) {
-          console.info(`File "${data.filename}" indexed successfully.`);
-          setUploadState({
-            status: 'success',
-            message: `Success: "${data.filename}" is indexed. You can now ask questions.`,
-            documentId: data.document_id,
-            filename: data.filename,
-          });
-        } else {
-          setUploadState({
-            status: 'success_with_delay',
-            message: `Indexing "${data.filename}" is taking a moment... You can ask questions shortly.`,
-            documentId: data.document_id,
-            filename: data.filename,
-          });
-        }
-
-        // Reset chat state after a new document is successfully indexed
-        setMessages([]);
-        setChatSessionId(null);
+      // Instantly update the UI to show processing has started.
+      setUploadState({
+        status: 'processing',
+        message: `Processing "${file.name}"...`,
+        documentId: data.document_id,
+        filename: file.name
+      });
+      // The new useEffect hook will now automatically start polling.
 
     } catch (err: unknown) {
       console.error('Error during file upload:', err);
 
+      // Handle failures of the initial request.
       let errorMessage = 'Upload failed. Please try again.';
       if (err instanceof Error) {
         errorMessage = err.message;
       }
       
       setUploadState({
-        status: 'error',
+        status: 'failed',
         message: errorMessage,
         documentId: null,
         filename: null
@@ -291,9 +259,9 @@ export default function ChatPage() {
                     onChange={handleFileChange}
                     accept="application/pdf"
                     className="hidden"
-                    disabled={uploadState.status === 'loading'}
+                    disabled={uploadState.status === 'processing'}
                 />
-                {uploadState.status === 'loading' ? (
+                {uploadState.status === 'processing' ? (
                   <div
                     className="relative w-[150px] h-[40px] rounded-lg p-0.5
                                bg-[conic-gradient(from_var(--border-angle)_at_50%_50%,#3b82f6_0%,#a855f7_50%,#3b82f6_100%)]
@@ -324,19 +292,23 @@ export default function ChatPage() {
             <div className="max-w-5xl mx-auto mt-4">
                 <div 
                     className={`flex items-center space-x-3 p-3 rounded-lg border text-sm shadow-lg
-                        ${uploadState.status === 'loading' && 'bg-gray-700/60 border-gray-600/80 text-gray-300'}
-                        ${uploadState.status === 'success' && 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]'}
-                        ${uploadState.status === 'error' && 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'}
-                        ${uploadState.status === 'success_with_delay' && 'bg-orange-900/20 border-orange-500/30 text-orange-300 shadow-[0_0_15px_rgba(251,146,60,0.2)]'}`
-                    }
+                        ${
+                          showTakingLonger
+                            ? 'bg-orange-900/20 border-orange-500/30 text-orange-300 shadow-[0_0_15px_rgba(251,146,60,0.2)]'
+                            : {
+                                'processing': 'bg-gray-700/60 border-gray-600/80 text-gray-300',
+                                'success': 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]',
+                                'failed': 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'
+                              }[uploadState.status]
+                        }
+                    `}
                 >
-                    {uploadState.status === 'loading' && <ClockIcon />}
+                    {(uploadState.status === 'processing' || showTakingLonger) && <ClockIcon />}
                     {uploadState.status === 'success' && <CheckIcon />}
-                    {uploadState.status === 'error' && <WarningIcon />}
-                    {uploadState.status === 'success_with_delay' && <ClockIcon />}
+                    {uploadState.status === 'failed' && <WarningIcon />}
                     <span>
-                      {uploadState.status === 'success_with_delay'
-                        ? "Indexing is taking a moment... You can ask questions shortly."
+                      {showTakingLonger 
+                        ? "Indexing is taking longer than usual... You can ask questions shortly." 
                         : uploadState.message}
                     </span>
                 </div>

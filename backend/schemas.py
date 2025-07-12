@@ -50,22 +50,31 @@ class ChatSession(BaseModel):
 
 #--- API Request / Response Schemas ---
 
-# Pydantic model for the incoming query request from the frontend.
 class QueryRequest(BaseModel):
+    """
+    Pydantic model for the incoming query request from the frontend.
+    """
     query: str
     chat_session_id: str | None = None  # Optional session ID for multi-turn conversations
 
-# Pydantic model for the response sent back to the frontend.
 class QueryResponse(BaseModel):
+    """
+    Pydantic model for the response sent back to the frontend after a query.
+    """
     answer: str
     chat_session_id: str  # Always return a session ID to maintain conversation state
 
-# Pydantic model for the response after a successful file upload.
-class UploadResponse(BaseModel):
+class UploadAcceptResponse(BaseModel):
+    """
+    Response model for when a file upload is successfully accepted for processing.
+    """
     message: str
-    filename: str
     document_id: str
 
-# Pydantic model for the status response.
 class StatusResponse(BaseModel):
-    is_ready: bool
+    """
+    Response model for the upload status check endpoint.
+    """
+    status: str
+    message: str | None = None
+    filename: str | None = None

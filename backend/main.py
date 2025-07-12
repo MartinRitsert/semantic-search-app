@@ -7,7 +7,7 @@ and CORS middleware for frontend communication.
 """
 
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from dotenv import load_dotenv
@@ -18,7 +18,7 @@ import logging
 from rich.logging import RichHandler
 
 # Import schemas and service functions
-from schemas import QueryRequest, QueryResponse, UploadResponse, ChatSession, MessageRole, StatusResponse
+from schemas import QueryRequest, QueryResponse, UploadAcceptResponse, ChatSession, MessageRole, StatusResponse
 import rag_service
 
 
@@ -59,6 +59,18 @@ logger = logging.getLogger(__name__)
 # database like PostgreSQL (for long-term, persistent storage).
 chat_sessions: dict[str, ChatSession] = {}
 
+# --- IMPORTANT: Production Architecture Note ---
+# The Solution for a Stateless, Scalable Backend:
+# In a production system, this session state must be externalized to a shared data
+# store. Each server instance would then be truly stateless, fetching and writing
+# session data from that central store.
+# 
+# Recommended solutions: Redis (for fast, ephemeral session caching) or a
+# database like PostgreSQL (for long-term, persistent storage).
+
+# In-memory "database" to track the status of background tasks
+tasks: dict[str, dict] = {}
+
 
 # --- Lifespan Events ---
 # Use a lifespan context manager to initialize clients on startup and shut down gracefully.
@@ -97,36 +109,33 @@ app.add_middleware(
 
 
 # --- API Endpoints ---
-@app.post("/upload/", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
+@app.post("/upload/", status_code=202, response_model=UploadAcceptResponse)
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...)
+) -> UploadAcceptResponse:
     """
     Endpoint to upload a PDF file for processing and indexing.
-    Accepts a file, extracts text, chunks, embeds, and stores it in Pinecone.
+    Accepts a file, and starts a background task to process it.
     """
     if file.content_type != "application/pdf":
         logger.error("Invalid file type: '%s'. Expected PDF.", file.content_type)
         raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
     
-    try:
-        # Read the file content into memory
-        file_content = await file.read()
-        
-        # Process and index the document using the service function
-        result = await rag_service.process_and_index_document(file_content)
-        
-        return UploadResponse(
-            message="File upload received. The index may not be immediately ready for queries due to eventual consistency.",
-            filename=file.filename,
-            document_id=result["document_id"]
-        )
-    except ValueError as e:
-        # Handle specific value errors from the service (e.g., no text found)
-        logger.error("Value error during file upload: %s", e)
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        # Handle other potential errors during processing
-        logger.error("An unexpected error occurred during file upload: %s", e)
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+    file_content = await file.read()
+    document_id = str(uuid.uuid4())
+    
+    # Immediately store the initial task status
+    tasks[document_id] = {"status": "processing", "filename": file.filename}
+
+    # Add the long-running job to be run in the background
+    background_tasks.add_task(process_document_in_background, document_id, file_content)
+
+    # Immediately return the ID so the frontend isn't blocked
+    return UploadAcceptResponse(
+        message="File upload accepted for processing.",
+        document_id=document_id
+    )
 
 
 @app.post("/query/", response_model=QueryResponse)
@@ -171,11 +180,28 @@ async def answer_query(request: QueryRequest) -> QueryResponse:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
 
 
-@app.get("/status/{document_id}", response_model=StatusResponse)
-async def get_document_status(document_id: str) -> StatusResponse:
-    """Endpoint to check if a document's vectors are ready to be queried."""
-    is_ready = await rag_service.check_index_readiness(document_id)
-    return StatusResponse(is_ready=is_ready)
+
+@app.get("/upload/status/{document_id}", response_model=StatusResponse)
+async def get_upload_status(document_id: str) -> StatusResponse:
+    task = tasks.get(document_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+    return StatusResponse(**task)
+
+
+# --- NEW: Add a helper function to run the processing ---
+async def process_document_in_background(document_id: str, file_content: bytes) -> None:
+    """Helper to run the heavy processing of document indexing outside of the main request."""
+    try:
+        await rag_service.process_and_index_document(file_content, document_id)
+        # Update the task status upon success
+        tasks[document_id]['status'] = 'success'
+        tasks[document_id]['message'] = f'Successfully indexed "{tasks[document_id]["filename"]}".'
+    except Exception as e:
+        logger.error("Background processing failed for doc %s: %s", document_id, e)
+        # Update the task status upon failure
+        tasks[document_id]['status'] = 'failed'
+        tasks[document_id]['message'] = str(e)
 
 
 # --- Uvicorn Server ---

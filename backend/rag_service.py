@@ -21,6 +21,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
 from typing import Any
 import logging
 from google.genai.errors import APIError
+import httpx
 
 # Import schemas
 from schemas import Message, format_history_for_prompt
@@ -39,13 +40,14 @@ EMBEDDING_MODEL_IDENTIFIER = "models/text-embedding-004"
 # These global variables will be initialized on application startup via the lifespan manager.
 # This avoids re-initializing clients on every request.
 google_ai_client: genai.Client | None = None
-pinecone_client: Pinecone | None = None
+pinecone_client: Pinecone | None = None  # TODO: Check if this is still needed after using the httpx client
 pinecone_index = None
+pinecone_http_client: httpx.AsyncClient | None = None
 
 
 def initialize_clients() -> None:
     """Initializes the Pinecone and Google AI clients using environment variables."""
-    global pinecone_client, google_ai_client, pinecone_index
+    global pinecone_client, google_ai_client, pinecone_index, pinecone_http_client
     
     # Load API Keys from environment variables
     pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -99,8 +101,19 @@ def initialize_clients() -> None:
     # Initialize an async-capable index object.
     try:
         index_host = pinecone_client.describe_index(index_name).host  # Get host URL
-        pinecone_index = pinecone_client.IndexAsyncio(host=index_host)
+        pinecone_index = pinecone_client.IndexAsyncio(host=index_host)  # TODO: Check if this is still needed after using the httpx client
         logger.info("Connected to Pinecone index '%s' at %s.", index_name, index_host)
+
+        # Initialize an httpx client for direct API calls to get headers  # TODO: Check if I should move this to the top to "Initialize Pinecone Connection"
+        pinecone_http_client = httpx.AsyncClient(
+            base_url=f"https://{index_host}",
+            headers={
+                "Api-Key": pinecone_api_key,
+                "Content-Type": "application/json",  # TODO: Should I use "contetnt-type" or doesn't it matter?
+            }  # TODO: What is if I don't specify a version as here? is this autmatically set to the latest?
+        )
+        logger.info("Initialized httpx client for direct Pinecone API calls.")
+
     except Exception as e:
         logger.critical("Failed to get host and connect to Pinecone index '%s': %s", index_name, e)
         raise RuntimeError(f"Failed to get host and connect to Pinecone index '{index_name}': {e}")
@@ -111,7 +124,7 @@ async def close_clients() -> None:
     Closes the Pinecone client. 
     The Google AI client is closed automatically by the library.
     """
-    global pinecone_index
+    global pinecone_index, pinecone_http_client
     if pinecone_index:
         logger.info("Closing Pinecone index connection...")
         try:
@@ -120,23 +133,34 @@ async def close_clients() -> None:
             logger.error("Error while closing Pinecone index connection: %s", e)
         finally:
             pinecone_index = None
+    
+    if pinecone_http_client:
+        logger.info("Closing Pinecone httpx client...")
+        await pinecone_http_client.aclose()  # TODO: Check if that's the correct way to close the http client
+        pinecone_http_client = None
 
 
-async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
+async def process_and_index_document(file_content: bytes, document_id: str) -> None:
     """
     Processes an uploaded PDF file, chunks it, generates embeddings, and upserts to Pinecone.
+    
+    The method completes successfully by returning None if the document is
+    indexed and passes the consistency check.
+
+    Raises:
+    TimeoutError: If the index readiness check fails to confirm
+                    consistency within the defined retry limit.
+    HTTPException: If any other error occurs during the process
+                    (e.g., embedding failure, database connection error).
     """
-    if not pinecone_index or not google_ai_client:
-        logger.error("Clients are not initialized. The application might not have started correctly.")
-        raise HTTPException(
-            status_code=500,
-            detail="Server configuration error: clients are not available."
-        )
+    if not pinecone_index or not google_ai_client or not pinecone_http_client:
+        logger.error("Clients are not initialized during background task.")
+        # Raise a standard error to be caught by the background task handler
+        raise RuntimeError("Clients are not initialized.")
 
-    document_id = str(uuid.uuid4())
-    logger.info("Processing document with unique ID: %s...", document_id)
+    logger.info("BG Task: Processing document with ID: %s...", document_id)
 
-    # 1. Load and Extract Text from in-memory bytes
+    # --- 1. Load and Extract Text from PDF ---
     # NOTE: pypdf's extract_text() is used here for simplicity. For a production system handling
     # diverse and complex PDFs, a more robust library like PyMuPDF or pdfplumber would be a 
     # better choice to handle varied layouts and ensure consistent text extraction order.
@@ -153,7 +177,7 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
             detail="Failed to process PDF. Please ensure it is a valid file."
         )
 
-    # 2. Chunk Text
+    # --- 2. Chunk Text ---
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200,
@@ -163,10 +187,9 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     text_chunks = text_splitter.split_text(full_document_text)
     logger.info("Document split into %d chunks.", len(text_chunks))
 
-    # 3. Embed and Upsert to Pinecone
+    # --- 3. Embed Text Chunks ---
     model_name = EMBEDDING_MODEL_IDENTIFIER
     google_batch_size = 100  # Google's text embedding API limit for texts in a batch
-    pinecone_upsert_batch_size = 100  # Pinecone's recommended upsert batch size
 
     all_vectors_to_upsert = [
         {"id": f"{document_id}_chunk_{i}", "metadata": {"text": chunk}, "values": []}
@@ -194,6 +217,7 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
             detail="Could not generate document embeddings. The embedding service may be down."
         )
 
+    # --- 4. Upsert Vectors to Pinecone ---
     # --- IMPORTANT: Production Architecture Note for Multi-Tenancy ---
     # The code below uses a "single-tenant" approach by clearing the entire index
     # (`delete_all=True`) on each upload. This is simple for a demo but is not
@@ -205,23 +229,47 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
     # To distinguish between documents within a user's namespace, the unique
     # `document_id` for each file would be stored as metadata with its vectors.
     # Queries can then be filtered by this metadata to search within a specific document.
+    pinecone_upsert_batch_size = 100  # Pinecone's recommended upsert batch size
+
     try:
+        logger.info("Checking default namespace in Pinecone for existing data...")
         index_stats = await pinecone_index.describe_index_stats()
         if index_stats.total_vector_count > 0:
             logger.info("Clearing previous data from index...")
             await pinecone_index.delete(delete_all=True)
+            logger.info("Initiated clearing of default namespace.")
+        else:
+            logger.info("Index is already empty. No need to clear.")
     except Exception as e:
         logger.error("Failed to clear Pinecone index: %s", e)
         raise HTTPException(
             status_code=503,
-            detail="Could not prepare the vector database for new document. Please try again later."
+            detail="Could not prepare the vector database for document upload. Please try again."
         )
 
     logger.info("Upserting %d vectors to Pinecone...", len(all_vectors_to_upsert))
+    target_lsn = None
     try:
         for i in range(0, len(all_vectors_to_upsert), pinecone_upsert_batch_size):
-            batch_to_upsert = all_vectors_to_upsert[i : i + pinecone_upsert_batch_size]
-            await pinecone_index.upsert(vectors=batch_to_upsert)
+            batch = all_vectors_to_upsert[i : i + pinecone_upsert_batch_size]
+            
+            # Use httpx client to get response headers for LSN
+            response = await pinecone_http_client.post(
+                url="/vectors/upsert",
+                json={"vectors": batch}
+            )
+            response.raise_for_status()
+
+            lsn_str = response.headers.get('x-pinecone-request-lsn')
+            if lsn_str:
+                target_lsn = int(lsn_str)
+
+    except httpx.HTTPStatusError as e:
+        logger.error("Pinecone upsert failed with status %d: %s", e.response.status_code, e.response.text)
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save document to the vector database. The database may be down."
+        )
     except Exception as e:
         logger.error("Pinecone upsert failed: %s", e)
         raise HTTPException(
@@ -229,27 +277,40 @@ async def process_and_index_document(file_content: bytes) -> dict[str, Any]:
             detail="Could not save document to the vector database. The database may be down."
         )
 
-    # Verify that the upserted vectors are queryable.
-    # NOTE: To handle Pinecone's eventual consistency, this readiness check performs a direct
-    # queryability test. It repeatedly tries to `fetch()` the first vector that was just upserted,
-    # as a successful fetch confirms the index is ready. If the check fails after the timeout,
-    # a warning is printed before continuing, prioritizing a smooth demo experience.
-    logger.info("Verifying index readiness...")
-    max_retries = 20
-    retry_delay = 1  # seconds
-
-    for i in range(max_retries):
-        is_ready = await check_index_readiness(document_id)
-        if is_ready:
-            break
-        logger.debug("Attempt %d/%d: Waiting for index update... Not ready yet.", i + 1, max_retries)
-        await asyncio.sleep(retry_delay)
+    # --- 5. Verify Index Consistency ---
+    # NOTE: To handle Pinecone's eventual consistency, this code block performs a direct
+    # queryability test using the Log Sequence Number (LSN). If the check fails after the
+    # timeout, a warning is printed before continuing, prioritizing a smooth demo experience.
+    logger.info("Verifying index consistency...")
+    if target_lsn:
+        logger.info("Last upsert returned LSN: %d. Waiting for index to catch up...", target_lsn)
+        is_ready = False
+        max_retries = 30
+        for i in range(max_retries):
+            is_ready = await check_index_consistency(target_lsn)
+            if is_ready:
+                # Add a pragmatic 2-second buffer to mitigate a subtle race condition
+                # inherent in eventually consistent systems. This delay ensures data has
+                # fully propagated across all query replicas, preventing read-after-write
+                # inconsistencies on the first query after an upsert.
+                logger.info("Consistency met. Adding a 5-second buffer for index to settle.")
+                # TODO: This is still not enough. Thus, a separate namespace for each document might be beneficial.
+                # TODO: This might be implemented in future versions by introducing a database making the backend fully stateless.
+                await asyncio.sleep(5)
+                break
+            logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, max_retries)
+            await asyncio.sleep(1)
+        else:
+            logger.warning("Index consistency could not be confirmed after %d seconds.", max_retries)
+            raise TimeoutError("Failed to prepare document for queries in time. Please upload document again. If this issue persists, try again later.")
     else:
-        # This 'else' block runs only if the loop finishes without a 'break'
-        logger.warning("Index readiness could not be confirmed after %d seconds.", max_retries * retry_delay)
+        logger.warning("Could not retrieve LSN from upsert response. Skipping consistency check. Defaulting to a waiting state of 20 seconds.")
+        # If we can't verify, add a generic sleep time as a fallback.
+        await asyncio.sleep(20)
+        is_ready = True
 
-    logger.info("Document processing and indexing complete.")
-    return {"document_id": document_id}
+    # --- Document Processing Complete ---
+    logger.info("Document with ID %s processed and indexed successfully.", document_id)
 
 
 async def get_rag_answer(query: str, history: list[Message]) -> str:
@@ -422,22 +483,40 @@ async def _send_message_with_retry(prompt: str) -> str:
         raise
 
 
-async def check_index_readiness(document_id: str) -> bool:
-    """Checks if the first chunk of a given document is queryable."""
-    if not pinecone_index:
+async def check_index_consistency(target_lsn: int) -> bool:
+    """Checks if the index has reached or passed a target Log Sequence Number (LSN).
+    If it has reached or exceeded the target LSN, it is considered consistent and ready for queries."""
+    if not pinecone_http_client:
         return False
     
     try:
-        # We only need to check for the existence of the very first chunk's vector
-        test_vector_id = f"{document_id}_chunk_0"
-        fetch_response = await pinecone_index.fetch(ids=[test_vector_id])
-        # If the vector is found, the index is ready for this document
-        if fetch_response and hasattr(fetch_response, "vectors"):
-            vectors = fetch_response.vectors
-            if vectors and vectors.get(test_vector_id):
-                logger.info("Index is ready for document '%s'.", document_id)
+        # Query with a dummy vector to get the current max indexed LSN from headers.
+        dummy_vector = [0.0] * 768 # Dimension for Google's embedding-004 model
+        response = await pinecone_http_client.post(
+            url="/query",
+            json={
+                "vector": dummy_vector,
+                "topK": 1,
+            }
+        )
+        response.raise_for_status()
+        
+        current_lsn_str = response.headers.get('x-pinecone-max-indexed-lsn')
+        
+        if current_lsn_str:
+            current_lsn = int(current_lsn_str)
+            if current_lsn >= target_lsn:
+                logger.info("Index is consistent. Current LSN %d >= Target LSN %d.", current_lsn, target_lsn)
                 return True
+            else:
+                logger.debug("Index not yet consistent. Current LSN: %d < Target LSN: %d.", current_lsn, target_lsn)
+                return False
+        else:
+            logger.info("Header 'x-pinecone-max-indexed-lsn' not found. This is expected if the index entries recently deleted.")
+            return False
+    except httpx.HTTPStatusError as e:
+        logger.error("API error during index consistency check: Status %d, Response: %s", e.response.status_code, e.response.text)
         return False
     except Exception as e:
-        logger.error("Error during index readiness check: %s", e)
+        logger.error("Error during index consistency check: %s", e)
         return False
