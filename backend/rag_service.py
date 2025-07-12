@@ -39,10 +39,10 @@ EMBEDDING_MODEL_IDENTIFIER = "models/text-embedding-004"
 # --- CLIENT AND STATE INITIALIZATION ---
 # These global variables will be initialized on application startup via the lifespan manager.
 # This avoids re-initializing clients on every request.
-google_ai_client: genai.Client | None = None
-pinecone_client: Pinecone | None = None  # TODO: Check if this is still needed after using the httpx client
+google_ai_client: genai.Client | None = None  # Google Gen AI Python SDK client
+pinecone_client: Pinecone | None = None  # Pinecone Python SDK client 
 pinecone_index = None
-pinecone_http_client: httpx.AsyncClient | None = None
+pinecone_http_client: httpx.AsyncClient | None = None  # Pinecone HTTPX client - used for direct API calls to Pinecone to get headers like LSN (Log Sequence Number) for consistency checks. 
 
 
 def initialize_clients() -> None:
@@ -98,19 +98,17 @@ def initialize_clients() -> None:
         logger.critical("Failed to create or connect to Pinecone index '%s': %s", index_name, e)
         raise RuntimeError(f"Failed to create or connect to Pinecone index '{index_name}': {e}")
 
-    # Initialize an async-capable index object.
+    # Initialize an async-capable index object and Pinecone HTTPX client.
     try:
+        # Initialize an async-capable index object.
         index_host = pinecone_client.describe_index(index_name).host  # Get host URL
-        pinecone_index = pinecone_client.IndexAsyncio(host=index_host)  # TODO: Check if this is still needed after using the httpx client
+        pinecone_index = pinecone_client.IndexAsyncio(host=index_host)
         logger.info("Connected to Pinecone index '%s' at %s.", index_name, index_host)
 
-        # Initialize an httpx client for direct API calls to get headers  # TODO: Check if I should move this to the top to "Initialize Pinecone Connection"
+        # Initialize an httpx client for direct API calls to get headers containing LSN.
         pinecone_http_client = httpx.AsyncClient(
             base_url=f"https://{index_host}",
-            headers={
-                "Api-Key": pinecone_api_key,
-                "Content-Type": "application/json",  # TODO: Should I use "contetnt-type" or doesn't it matter?
-            }  # TODO: What is if I don't specify a version as here? is this autmatically set to the latest?
+            headers={"Api-Key": pinecone_api_key}
         )
         logger.info("Initialized httpx client for direct Pinecone API calls.")
 
@@ -136,7 +134,7 @@ async def close_clients() -> None:
     
     if pinecone_http_client:
         logger.info("Closing Pinecone httpx client...")
-        await pinecone_http_client.aclose()  # TODO: Check if that's the correct way to close the http client
+        await pinecone_http_client.aclose()
         pinecone_http_client = None
 
 
@@ -294,8 +292,9 @@ async def process_and_index_document(file_content: bytes, document_id: str) -> N
                 # fully propagated across all query replicas, preventing read-after-write
                 # inconsistencies on the first query after an upsert.
                 logger.info("Consistency met. Adding a 5-second buffer for index to settle.")
-                # TODO: This is still not enough. Thus, a separate namespace for each document might be beneficial.
-                # TODO: This might be implemented in future versions by introducing a database making the backend fully stateless.
+                # TODO: This is still not enough. Thus, a separate namespace for each document would be beneficial.
+                # TODO: This will be implemented in future versions by introducing a database making the backend fully stateless.
+
                 await asyncio.sleep(5)
                 break
             logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, max_retries)
