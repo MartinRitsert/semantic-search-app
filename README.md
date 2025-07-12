@@ -1,6 +1,9 @@
 # 🔎 Semantic Search Application with RAG
 Status: Work in Progress 👨‍💻 (Actively Under Development)
 
+## 🎬 Application Preview
+https://github.com/user-attachments/assets/8a92bdc7-c560-4633-85e7-439a44024673
+
 ## 🎯 Purpose
 This project focuses on developing an advanced semantic search and question-answering application. The primary goal is to enable users to effectively query custom or lengthy documents, overcoming common limitations of standard Large Language Models (LLMs) related to context window sizes and access to specific, private knowledge sources. This is achieved by implementing a robust Retrieval-Augmented Generation (RAG) pipeline.
 
@@ -40,4 +43,4 @@ To test the document querying functionality inside the .ipynb notebooks with the
 * **Paper Link:** Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., ... & Polosukhin, I. (2017). Attention is all you need. https://arxiv.org/abs/1706.03762
 * **Required Local Path:** For the application's current configuration to process this specific document (or others you wish to test locally), please download the PDF and place it in a data directory at the root of this project. For this example paper, the path would be: "data/Attention Is All You Need.pdf".
 
-*This README provides an overview based on the project's current development stage (as of June 2025). More details and code will be added very soon.*
+*This README provides an overview based on the project's current development stage (as of July 2025). More details and code will be added very soon.*
