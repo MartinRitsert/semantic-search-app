@@ -237,7 +237,7 @@ async def process_document_in_background(document_id: str, file_content: bytes) 
         
         await rag_service.process_and_index_document(file_content, document_id)
         doc.status = 'success'
-        doc.message = f'Successfully indexed "{doc.filename}".'
+        doc.message = f'"{doc.filename}" is ready. You can now ask questions.'
         db.commit()
     except Exception as e:
         logger.error("Background processing failed for doc %s: %s", document_id, e)

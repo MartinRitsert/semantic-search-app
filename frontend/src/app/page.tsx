@@ -155,9 +155,8 @@ export default function ChatPage() {
   const handleUploadClick = () => {
     // Show a simple, informative alert to the user.
     const warningMessage = "Public Demo Notice:\n\n" +
-                       "This is a shared demo that handles one document at a time. " +
-                       "Uploading a new file will replace the current one for all users.\n\n" +
-                       "Please do not upload any private or sensitive information.";
+                      "For this demo, your document will be processed and stored temporarily.\n\n" +
+                      "Please do not upload any private or sensitive information.";
     window.alert(warningMessage);
     
     // Programmatically click the hidden file input to open the file browser.
@@ -308,7 +307,7 @@ export default function ChatPage() {
                       className="relative flex h-full w-full items-center justify-center rounded-[6px] bg-gray-800"
                     >
                       <span className="text-sm font-medium text-gray-300">
-                        Indexing...
+                        Processing...
                       </span>
                     </div>
                   </div>
@@ -343,7 +342,7 @@ export default function ChatPage() {
                     {uploadState.status === 'failed' && <WarningIcon />}
                     <span>
                       {showTakingLonger 
-                        ? "Indexing is taking longer than usual... You can ask questions shortly." 
+                        ? "Processing is taking longer than usual... You can ask questions shortly." 
                         : uploadState.message}
                     </span>
                 </div>
