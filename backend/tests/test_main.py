@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from main import app
-import rag_service
+import backend.pipeline as pipeline
 
 
 # Create a TestClient instance that will be used to make simulated
@@ -48,9 +48,9 @@ def mock_rag_service(monkeypatch: MonkeyPatch) -> None:
         return {"answer": f"This is a mocked answer to '{query}'.", "chat_session_id": "mock_session_123"}
 
     # Use monkeypatch to replace the real functions with our mocks for the duration of a test.
-    monkeypatch.setattr(rag_service, "initialize_clients", lambda: None) # Mock initialization to do nothing
-    monkeypatch.setattr(rag_service, "process_and_index_document", mock_process_and_index_document)
-    monkeypatch.setattr(rag_service, "get_rag_answer", mock_get_rag_answer)
+    monkeypatch.setattr(pipeline, "initialize_clients", lambda: None) # Mock initialization to do nothing
+    monkeypatch.setattr(pipeline, "process_and_index_document", mock_process_and_index_document)
+    monkeypatch.setattr(pipeline, "get_rag_answer", mock_get_rag_answer)
 
 
 # --- Test Cases for the /upload/ Endpoint ---
@@ -132,7 +132,7 @@ def test_answer_query_processing_error(monkeypatch: MonkeyPatch) -> None:
     async def mock_raise_exception(*args, **kwargs):
         raise Exception("A simulated service error occurred.")
 
-    monkeypatch.setattr(rag_service, "get_rag_answer", mock_raise_exception)
+    monkeypatch.setattr(pipeline, "get_rag_answer", mock_raise_exception)
     
     request_data = {"query": "This query will cause an error."}
     response = client.post("/query/", json=request_data)

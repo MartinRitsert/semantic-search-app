@@ -7,24 +7,35 @@ and CORS middleware for frontend communication.
 """
 
 
-from fastapi import Body, FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Depends
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
 import asyncio
 import time
-import database
-from dotenv import load_dotenv
-from contextlib import asynccontextmanager
-from tenacity import RetryError
-from sqlalchemy.orm import Session
 import uuid
-from typing import Generator
 import logging
-from rich.logging import RichHandler
+from contextlib import asynccontextmanager
 
-# Import schemas and service functions
-from schemas import Message, QueryRequest, QueryResponse, UploadAcceptResponse, MessageRole, StatusResponse, UserResponse
-import rag_service
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Depends, Body
+from fastapi.middleware.cors import CORSMiddleware
+from rich.logging import RichHandler
+from sqlalchemy.orm import Session
+from tenacity import RetryError
+import uvicorn
+
+# Import modules
+import database
+import pipeline
+import clients
+
+# Import schemas
+from schemas import (
+    Message,
+    MessageRole,
+    QueryRequest,
+    QueryResponse,
+    UploadAcceptResponse,
+    StatusResponse,
+    UserResponse
+)
 
 
 # Load environment variables at the start.
@@ -56,13 +67,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(periodic_cleanup_task())  # Start the periodic cleanup task for old sessions
 
     # Initialize the RAG service clients
-    rag_service.initialize_clients()
+    clients.initialize_clients()
 
     yield
 
     # This block runs on application shutdown
     logger.info("--- Application Shutdown ---")
-    await rag_service.close_clients()
+    await clients.close_clients()
 
 
 # Initialize the FastAPI application with the lifespan manager
@@ -85,17 +96,9 @@ app.add_middleware(
 )
 
 
-def get_db() -> Generator[Session, None, None]:
-    db = database.SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 # --- API Endpoints ---
 @app.post("/users/", response_model=UserResponse)
-async def create_user(db: Session = Depends(get_db)) -> UserResponse:
+async def create_user(db: Session = Depends(database.get_db)) -> UserResponse:
     """Create a new anonymous user and return the ID."""
     user_id = str(uuid.uuid4())
     new_user = database.User(id=user_id)
@@ -104,12 +107,18 @@ async def create_user(db: Session = Depends(get_db)) -> UserResponse:
     return UserResponse(user_id=user_id)
 
 
+# --- Production Architecture Note on Background Tasks ---
+# FastAPI's BackgroundTasks are executed "fire-and-forget" within the same process
+# as the main application. This is simple and effective for this demo.
+# For a production system that needs guaranteed task execution, monitoring, and
+# retries, a dedicated task queue like Celery with Redis or RabbitMQ would be
+# the more robust solution.
 @app.post("/upload/", status_code=202, response_model=UploadAcceptResponse)
 async def upload_document(
     background_tasks: BackgroundTasks,
     user_id: str = Body(...),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(database.get_db)
 ) -> UploadAcceptResponse:
     """
     Endpoint to upload a PDF file for processing and indexing.
@@ -137,7 +146,7 @@ async def upload_document(
         # Add the processing and cleanup tasks to the background
         background_tasks.add_task(process_document_in_background, new_document_id, file_content)
         if previous_doc is not None:
-            background_tasks.add_task(rag_service.delete_namespace, previous_doc.id)
+            background_tasks.add_task(pipeline.delete_previous_document_namespace, previous_doc.id)
 
         # Immediately return the ID to prevent blocking the frontend.
         return UploadAcceptResponse(
@@ -151,7 +160,7 @@ async def upload_document(
 
 
 @app.post("/query/", response_model=QueryResponse)
-async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> QueryResponse:
+async def answer_query(request: QueryRequest, db: Session = Depends(database.get_db)) -> QueryResponse:
     """
     Endpoint to receive a user query and return a RAG-generated answer.
     Manages chat history via a session ID.
@@ -160,10 +169,10 @@ async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> 
         logger.error("Received an empty query.")
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     
-    chat_session_id = request.chat_session_id
-    current_history = []
-
     try:
+        chat_session_id = request.chat_session_id
+        current_history = []
+
         # 1. Manage State: Look up the chat session or create a new one.
         if chat_session_id:
             chat_session = db.query(database.ChatSession).filter(
@@ -186,7 +195,7 @@ async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> 
 
         # 2. Call Service: Pass the query and history to the stateless service function.
         logger.info("Passing query to RAG service for session: %s", chat_session_id)
-        answer = await rag_service.get_rag_answer(request.query, current_history, request.document_id)
+        answer = await pipeline.get_rag_answer(request.query, current_history, request.document_id)
 
         # 3. Update State: Save the new user message and model answer to the session.
         current_history.append(Message(role=MessageRole.USER, text=request.query))
@@ -195,6 +204,7 @@ async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> 
         db.commit()
         
         return QueryResponse(answer=answer, chat_session_id=chat_session_id)
+    
     except RetryError:
         logger.error("AI model is overloaded. Retry limit exceeded.")
         db.rollback()
@@ -211,7 +221,7 @@ async def answer_query(request: QueryRequest, db: Session = Depends(get_db)) -> 
 
 
 @app.get("/upload/status/{document_id}", response_model=StatusResponse)
-async def get_upload_status(document_id: str, db: Session = Depends(get_db)) -> StatusResponse:
+async def get_upload_status(document_id: str, db: Session = Depends(database.get_db)) -> StatusResponse:
     try:
         # Fetch the task status from the database
         doc = db.query(database.Document).filter(database.Document.id == document_id).first()
@@ -235,10 +245,11 @@ async def process_document_in_background(document_id: str, file_content: bytes) 
             logger.error("Background task started for non-existent document ID: %s", document_id)
             return
         
-        await rag_service.process_and_index_document(file_content, document_id)
+        await pipeline.process_and_index_document(file_content, document_id)
         doc.status = 'success'
         doc.message = f'"{doc.filename}" is ready. You can now ask questions.'
         db.commit()
+
     except Exception as e:
         logger.error("Background processing failed for doc %s: %s", document_id, e)
         db.rollback()
@@ -267,7 +278,7 @@ async def periodic_cleanup_task(ttl_hours: int = 24) -> None:
 
             for doc in expired_docs:
                 logger.info(f"Cleanup Task: Deleting expired document and namespace '{doc.id}'...")
-                await rag_service.delete_namespace(doc.id)
+                await pipeline.delete_previous_document_namespace(doc.id)
                 db.delete(doc)
             db.commit()
             logger.info("Cleanup Task: Successfully deleted %d expired documents.", len(expired_docs))

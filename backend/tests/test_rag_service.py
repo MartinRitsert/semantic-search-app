@@ -14,8 +14,8 @@ import sys
 # Add the parent directory to the Python path to allow importing from rag_service
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import rag_service
-from rag_service import genai_types
+import backend.pipeline as pipeline
+from backend.pipeline import genai_types
 
 
 # --- Unit Tests for process_and_index_document ---
@@ -57,7 +57,7 @@ async def test_process_and_index_document_success_two_pages(
     mock_pinecone_index.upsert.return_value = None
 
     # --- Act ---
-    await rag_service.process_and_index_document(b"dummy_pdf_content")
+    await pipeline.process_and_index_document(b"dummy_pdf_content")
 
     # --- Assert ---
     # Assert that the reader was used and text was extracted for both pages.
@@ -99,7 +99,7 @@ async def test_process_and_index_document_no_text_extracted(
 
     # --- Act & Assert ---
     with pytest.raises(ValueError, match="Could not extract any text from the provided PDF."):
-        await rag_service.process_and_index_document(b"dummy_pdf_content")
+        await pipeline.process_and_index_document(b"dummy_pdf_content")
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_get_rag_answer_success(
 
     # --- Act ---
     query = "What is the key information?"
-    result = await rag_service.get_rag_answer(query, chat_session_id=None)
+    result = await pipeline.get_rag_answer(query, chat_session_id=None)
 
     # --- Assert ---
     mock_google_client.aio.models.embed_content.assert_awaited_once_with(

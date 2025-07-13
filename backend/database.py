@@ -1,10 +1,18 @@
+"""
+This module defines the database schema and initializes the SQLite database.
+It uses SQLAlchemy for ORM and is designed for local development and single-container deployments.
+"""
+
+
 import time
 import json
-from sqlalchemy import ForeignKey, create_engine, Column, String, Float, Text
-from sqlalchemy.orm import sessionmaker, declarative_base
+from typing import Generator
+from sqlalchemy import create_engine, Column, String, Float, Text, ForeignKey
+from sqlalchemy.orm import Session, sessionmaker, declarative_base
 
 # Import schemas
 from schemas import Message
+
 
 # --- Production Architecture Note ---
 # This application uses SQLite, a simple file-based database, which is ideal for
@@ -21,7 +29,7 @@ from schemas import Message
 # database over the network, ensuring a single source of truth.
 
 
-# Use SQLite, a simple file-based database that requires no extra installation.
+# Database connection URL
 DATABASE_URL = "sqlite:///./rag_app.db"
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -74,3 +82,11 @@ class ChatSession(Base):
 def init_db():
     """Create the database and table on application startup."""
     Base.metadata.create_all(bind=engine)
+
+
+def get_db() -> Generator[Session, None, None]:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
