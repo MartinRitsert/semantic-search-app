@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 # --- CONSTANTS ---
 LLM_MODEL_IDENTIFIER = "gemini-2.0-flash"
 EMBEDDING_MODEL_IDENTIFIER = "models/text-embedding-004"
+CONSISTENCY_CHECK_RETRIES = 45  # Number of retries to check index consistency (1 second per retry)
 
 
 # --- CLIENT AND STATE INITIALIZATION ---
@@ -260,19 +261,18 @@ async def process_and_index_document(file_content: bytes, document_id: str) -> N
 
     logger.info("Last upsert returned LSN: %d. Waiting for index to catch up...", target_lsn)
     is_ready = False
-    max_retries = 45
 
-    for i in range(max_retries):
+    for i in range(CONSISTENCY_CHECK_RETRIES):
         is_ready = await check_index_consistency(target_lsn, document_id)
         if is_ready:
             logger.info("Consistency met. Index is ready for queries.")
             break
 
-        logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, max_retries)
+        logger.debug("Attempt %d/%d: Index not yet consistent. Waiting for index to catch up...", i + 1, CONSISTENCY_CHECK_RETRIES)
         await asyncio.sleep(1)
 
     else:
-        logger.warning("Index consistency could not be confirmed after %d seconds.", max_retries)
+        logger.warning("Index consistency could not be confirmed after %d seconds.", CONSISTENCY_CHECK_RETRIES)
         raise TimeoutError("Failed to prepare document for queries in time. Please upload document again. If this issue persists, try again later.")
 
     # --- Document Processing Complete ---
