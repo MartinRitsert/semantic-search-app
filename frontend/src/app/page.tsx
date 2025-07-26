@@ -178,6 +178,18 @@ export default function ChatPage() {
 
     setShowTakingLonger(false);
 
+    // Reset chat messages and session ID
+    setMessages([]);
+    setChatSessionId(null);
+
+    // Instantly update the UI to show processing has started.
+    setUploadState({
+      status: 'processing',
+      message: `Processing "${file.name}"...`,
+      documentId: null,
+      filename: file.name
+    });
+
     const formData = new FormData();
     formData.append('file', file);
     formData.append('user_id', userId);
@@ -193,18 +205,7 @@ export default function ChatPage() {
 
       const data = await response.json();
 
-      // Reset chat messages and session ID
-      setMessages([]);
-      setChatSessionId(null);
-
-      // Instantly update the UI to show processing has started.
-      setUploadState({
-        status: 'processing',
-        message: `Processing "${file.name}"...`,
-        documentId: data.document_id,
-        filename: file.name
-      });
-      // The new useEffect hook will now automatically start polling.
+      setUploadState(prev => ({ ...prev, documentId: data.document_id }));
 
     } catch (err: unknown) {
       console.error('Error during file upload:', err);
@@ -295,57 +296,57 @@ export default function ChatPage() {
                     className="hidden"
                     disabled={uploadState.status === 'processing'}
                 />
-                {uploadState.status === 'processing' ? (
-                  <div
-                    className="relative w-[150px] h-[40px] rounded-lg p-0.5
-                               bg-[conic-gradient(from_var(--border-angle)_at_50%_50%,#3b82f6_0%,#a855f7_50%,#3b82f6_100%)]
-                               animate-border-rotate"
-                    aria-label="Uploading and indexing document"
-                    role="status"
-                  >
-                    <div
-                      className="relative flex h-full w-full items-center justify-center rounded-[6px] bg-gray-800"
-                    >
-                      <span className="text-sm font-medium text-gray-300">
-                        Processing...
-                      </span>
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleUploadClick}
-                    className="flex items-center justify-center space-x-2 px-4 py-2 bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors w-[150px] h-[40px] whitespace-nowrap"
-                  >
+                <button
+                  onClick={handleUploadClick}
+                  disabled={uploadState.status === 'processing'}
+                  className="flex items-center justify-center space-x-2 px-4 py-2 
+                            bg-gray-700 rounded-lg hover:bg-gray-600 transition-colors w-[150px] h-[40px] whitespace-nowrap 
+                            disabled:bg-gray-800 disabled:text-gray-400 disabled:cursor-not-allowed"
+                >
+                  <>
                     <UploadIcon />
                     <span>Upload PDF</span>
-                  </button>
-                )}
+                  </>
+                </button>
             </div>
         </div>
         {uploadState.message && uploadState.status !== 'idle' && (
             <div className="max-w-5xl mx-auto mt-4">
+              {(uploadState.status === 'processing' || showTakingLonger) ? (
+                <div
+                  className={`relative rounded-lg p-0.5 animate-border-rotate ${
+                    showTakingLonger
+                      ? 'bg-[conic-gradient(from_var(--border-angle)_at_50%_50%,#f59e0b_0%,#f97316_50%,#f59e0b_100%)]'
+                      : 'bg-[conic-gradient(from_var(--border-angle)_at_50%_50%,#3b82f6_0%,#a855f7_50%,#3b82f6_100%)]'
+                  }`}
+                >
+                  <div className={`flex items-center space-x-3 p-3 rounded-[7px] bg-gray-900 text-sm ${
+                    showTakingLonger ? 'text-orange-300' : 'text-gray-300'
+                  }`}>
+                    <ClockIcon />
+                    <span>
+                      {showTakingLonger
+                        ? "Processing is taking longer than usual... You can ask questions shortly."
+                        : uploadState.message}
+                    </span>
+                  </div>
+                </div>
+              ) : (
                 <div 
                     className={`flex items-center space-x-3 p-3 rounded-lg border text-sm shadow-lg
                         ${
-                          showTakingLonger
-                            ? 'bg-orange-900/20 border-orange-500/30 text-orange-300 shadow-[0_0_15px_rgba(251,146,60,0.2)]'
-                            : {
-                                'processing': 'bg-gray-700/60 border-gray-600/80 text-gray-300',
-                                'success': 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]',
-                                'failed': 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'
-                              }[uploadState.status]
+                          {
+                            'success': 'bg-green-900/20 border-green-500/30 text-green-300 shadow-[0_0_15px_rgba(34,197,94,0.2)]',
+                            'failed': 'bg-red-900/20 border-red-500/30 text-red-300 shadow-[0_0_15px_rgba(239,68,68,0.2)]'
+                          }[uploadState.status]
                         }
                     `}
                 >
-                    {(uploadState.status === 'processing' || showTakingLonger) && <ClockIcon />}
                     {uploadState.status === 'success' && <CheckIcon />}
                     {uploadState.status === 'failed' && <WarningIcon />}
-                    <span>
-                      {showTakingLonger 
-                        ? "Processing is taking longer than usual... You can ask questions shortly." 
-                        : uploadState.message}
-                    </span>
+                    <span>{uploadState.message}</span>
                 </div>
+              )}
             </div>
         )}
       </header>
@@ -356,7 +357,7 @@ export default function ChatPage() {
                 <p>No messages yet.</p>
                 <p>
                   {uploadState.status === 'success'
-                    ? "PDF uploaded - Start asking questions!"
+                    ? "PDF is ready - Start asking questions!"
                     : "Upload a PDF to get started!"}
                 </p>
              </div>
