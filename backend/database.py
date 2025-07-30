@@ -4,14 +4,19 @@ It uses SQLAlchemy for ORM and is designed for local development and single-cont
 """
 
 
+import logging
 import time
 import json
-from typing import Generator
+from typing import Iterator
 from sqlalchemy import create_engine, Column, String, Float, Text, ForeignKey
 from sqlalchemy.orm import Session, sessionmaker, declarative_base
 
 # Import schemas
 from schemas import Message
+
+
+# Get a logger for this module.
+logger = logging.getLogger(__name__)
 
 
 # --- Production Architecture Note ---
@@ -79,12 +84,24 @@ class ChatSession(Base):
         self._history = json.dumps([msg.model_dump() for msg in messages])
 
 
-def init_db():
-    """Create the database and table on application startup."""
-    Base.metadata.create_all(bind=engine)
+def init_db() -> None:
+    """
+    Create the database and table on application startup.
+    This is safe to run multiple times; it won't recreate existing tables.
+    """
+    logger.info("Creating database and tables...")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database and tables created successfully.")
+    except Exception as e:
+        logger.error("An error occurred while creating tables: %s", e)
 
 
-def get_db() -> Generator[Session, None, None]:
+def get_db() -> Iterator[Session]:
+    """
+    Dependency function to get a database session for each API request.
+    Ensures the session is always closed after the request.
+    """
     db = SessionLocal()
     try:
         yield db

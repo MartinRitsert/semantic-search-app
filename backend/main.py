@@ -20,6 +20,7 @@ from rich.logging import RichHandler
 from sqlalchemy.orm import Session
 from tenacity import RetryError
 import uvicorn
+from typing import AsyncIterator, Iterator
 
 # Import modules
 import database
@@ -57,7 +58,7 @@ logger = logging.getLogger(__name__)
 # --- Lifespan Events ---
 # Use a lifespan context manager to initialize clients on startup and shut down gracefully.
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Handles application startup and shutdown events."""
     # This block runs on application startup
     logger.info("--- Application Startup ---")
